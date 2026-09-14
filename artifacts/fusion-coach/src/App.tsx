@@ -58,6 +58,8 @@ type HistoryItem = {
 
 type AuthStep = 'chooser' | 'face-id' | 'new-account' | 'guest' | 'signed-in';
 type FaceScanState = 'idle' | 'scanning' | 'complete' | 'error';
+type OverlayView = 'human-eye' | 'ai' | 'tracking' | 'transcript' | 'frequency' | 'scores';
+type FaceBox = { x: number; y: number; width: number; height: number };
 
 type SpeechRecognitionLike = {
   continuous: boolean;
@@ -98,16 +100,25 @@ function Home() {
   const [speechWords, setSpeechWords] = useState(0);
   const [speechSeconds, setSpeechSeconds] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
+  const [transcript, setTranscript] = useState('');
+  const [frequencyData, setFrequencyData] = useState<number[]>(Array.from({ length: 24 }, () => 0));
+  const [faceBox, setFaceBox] = useState<FaceBox | null>(null);
+  const [faceRecognitionStatus, setFaceRecognitionStatus] = useState<'unavailable' | 'searching' | 'detected'>('unavailable');
   const [history, setHistory] = useState(initialHistory);
   const [notice, setNotice] = useState('');
   const [activeNav, setActiveNav] = useState('Practice room');
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [overlay, setOverlay] = useState<OverlayView | null>(null);
+  const [paused, setPaused] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const activeRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioFrameRef = useRef<number | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const faceDetectorRef = useRef<{ detect: (source: HTMLVideoElement) => Promise<Array<{ boundingBox: DOMRectReadOnly }>> } | null>(null);
+  const faceFrameRef = useRef<number | null>(null);
+  const faceRecognitionStatusRef = useRef<'unavailable' | 'searching' | 'detected'>('unavailable');
 
   useEffect(() => {
     const savedName = window.localStorage.getItem('fusion-coach.identity');
@@ -118,11 +129,15 @@ function Home() {
   }, []);
 
   useEffect(() => {
-    activeRef.current = active;
-  }, [active]);
+    activeRef.current = active && !paused;
+  }, [active, paused]);
 
   useEffect(() => {
-    if (!active) return;
+    faceRecognitionStatusRef.current = faceRecognitionStatus;
+  }, [faceRecognitionStatus]);
+
+  useEffect(() => {
+    if (!active || paused) return;
     const timer = window.setInterval(() => setElapsed((current) => current + 1), 1000);
     return () => {
       window.clearInterval(timer);
@@ -132,15 +147,71 @@ function Home() {
   useEffect(() => {
     if (videoRef.current && streamRef.current) {
       videoRef.current.srcObject = streamRef.current;
+      void videoRef.current.play().catch(() => undefined);
+      startFaceDetection();
+    } else {
+      stopFaceDetection();
     }
   }, [cameraEnabled]);
 
   useEffect(() => () => {
     recognitionRef.current?.stop();
     if (audioFrameRef.current) window.cancelAnimationFrame(audioFrameRef.current);
+    if (faceFrameRef.current) window.cancelAnimationFrame(faceFrameRef.current);
     void audioContextRef.current?.close();
     streamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
+
+  const startFaceDetection = () => {
+    const faceWindow = window as typeof window & {
+      FaceDetector?: new (options?: { fastMode?: boolean; maxDetectedFaces?: number }) => {
+        detect: (source: HTMLVideoElement) => Promise<Array<{ boundingBox: DOMRectReadOnly }>>;
+      };
+    };
+    const FaceDetectorConstructor = faceWindow.FaceDetector;
+    if (!FaceDetectorConstructor || !videoRef.current) {
+      setFaceRecognitionStatus('unavailable');
+      return;
+    }
+    const detector = new FaceDetectorConstructor({ fastMode: true, maxDetectedFaces: 1 });
+    faceDetectorRef.current = detector;
+    setFaceRecognitionStatus('searching');
+
+    const detect = async () => {
+      const video = videoRef.current;
+      if (!video || !faceDetectorRef.current) return;
+      if (video.readyState >= 2 && video.videoWidth > 0) {
+        try {
+          const faces = await detector.detect(video);
+          const bounds = faces[0]?.boundingBox;
+          if (bounds) {
+            setFaceBox({
+              x: 100 - ((bounds.x + bounds.width) / video.videoWidth) * 100,
+              y: (bounds.y / video.videoHeight) * 100,
+              width: (bounds.width / video.videoWidth) * 100,
+              height: (bounds.height / video.videoHeight) * 100,
+            });
+            setFaceRecognitionStatus('detected');
+          } else {
+            setFaceBox(null);
+            setFaceRecognitionStatus('searching');
+          }
+        } catch {
+          setFaceRecognitionStatus('unavailable');
+        }
+      }
+      faceFrameRef.current = window.requestAnimationFrame(() => void detect());
+    };
+    void detect();
+  };
+
+  const stopFaceDetection = () => {
+    if (faceFrameRef.current) window.cancelAnimationFrame(faceFrameRef.current);
+    faceFrameRef.current = null;
+    faceDetectorRef.current = null;
+    setFaceBox(null);
+    setFaceRecognitionStatus('unavailable');
+  };
 
   const startAudioMonitor = (stream: MediaStream) => {
     const AudioContextConstructor = window.AudioContext;
@@ -151,6 +222,7 @@ function Home() {
     analyser.fftSize = 256;
     context.createMediaStreamSource(stream).connect(analyser);
     const data = new Uint8Array(analyser.fftSize);
+    const frequencies = new Uint8Array(analyser.frequencyBinCount);
     audioContextRef.current = context;
 
     const sample = () => {
@@ -158,6 +230,8 @@ function Home() {
       analyser.getByteTimeDomainData(data);
       const level = Math.sqrt(data.reduce((total, value) => total + ((value - 128) / 128) ** 2, 0) / data.length);
       setAudioLevel(level);
+      analyser.getByteFrequencyData(frequencies);
+      setFrequencyData(Array.from(frequencies.slice(0, 24)));
       if (activeRef.current && level > 0.045) setSpeechSeconds((current) => current + 0.05);
       audioFrameRef.current = window.requestAnimationFrame(sample);
     };
@@ -176,13 +250,17 @@ function Home() {
     recognition.interimResults = false;
     recognition.lang = 'en-US';
     recognition.onresult = (event) => {
-      let words = 0;
+      const finalText: string[] = [];
       for (let index = 0; index < event.results.length; index += 1) {
         if (event.results[index].isFinal) {
-          words += event.results[index][0].transcript.trim().split(/\s+/).filter(Boolean).length;
+          finalText.push(event.results[index][0].transcript.trim());
         }
       }
-      if (words > 0) setSpeechWords(words);
+      const nextTranscript = finalText.join(' ').trim();
+      if (nextTranscript) {
+        setTranscript(nextTranscript);
+        setSpeechWords(nextTranscript.split(/\s+/).filter(Boolean).length);
+      }
     };
     recognition.onend = () => {
       if (activeRef.current) {
@@ -280,6 +358,9 @@ function Home() {
     setScore(null);
     setSpeechWords(0);
     setSpeechSeconds(0);
+    setTranscript('');
+    setFrequencyData(Array.from({ length: 24 }, () => 0));
+    setPaused(false);
     setActive(true);
     activeRef.current = true;
     startSpeechCapture();
@@ -289,6 +370,21 @@ function Home() {
   const handleNav = (label: string) => {
     setActiveNav(label);
     setNotice('');
+  };
+
+  const restartAssessment = () => {
+    setActive(false);
+    activeRef.current = false;
+    stopSpeechCapture();
+    setPaused(false);
+    setCompleted(false);
+    setElapsed(0);
+    setScore(null);
+    setSpeechWords(0);
+    setSpeechSeconds(0);
+    setTranscript('');
+    setFaceBox(null);
+    setNotice('Assessment restarted. The score will stay empty until real signals are captured.');
   };
 
   const finishSignIn = (name: string, persist = true) => {
@@ -316,8 +412,12 @@ function Home() {
       streamRef.current = stream;
       setCameraEnabled(true);
       window.setTimeout(() => {
-        setFaceScanState('complete');
-        finishSignIn('Returning speaker');
+        if (faceRecognitionStatusRef.current === 'detected') {
+          setFaceScanState('complete');
+          finishSignIn('Returning speaker');
+        } else {
+          setFaceScanState('error');
+        }
       }, 1200);
     } catch {
       setFaceScanState('error');
@@ -347,10 +447,31 @@ function Home() {
       } else if (event.key.toLowerCase() === 'm' && authStep === 'signed-in') {
         event.preventDefault();
         void toggleMic();
-      } else if (event.key === '1') handleNav('Practice room');
-      else if (event.key === '2') handleNav('Session history');
-      else if (event.key === '3') handleNav('Progress');
-      else if (event.key === '4') handleNav('Settings');
+      } else if (event.key === '1') setOverlay('human-eye');
+      else if (event.key === '2') setOverlay('ai');
+      else if (event.key === '3') setOverlay('tracking');
+      else if (event.key.toLowerCase() === 't') setOverlay('transcript');
+      else if (event.key.toLowerCase() === 'f') setOverlay('frequency');
+      else if (event.key.toLowerCase() === 's') setOverlay('scores');
+      else if (event.key.toLowerCase() === 'h') setShortcutsOpen(true);
+      else if (event.key.toLowerCase() === 'r') restartAssessment();
+      else if (event.key.toLowerCase() === 'p') {
+        event.preventDefault();
+        setPaused((current) => {
+          const next = !current;
+          activeRef.current = active && !next;
+          if (next) stopSpeechCapture();
+          else if (active) startSpeechCapture();
+          return next;
+        });
+      } else if (event.key.toLowerCase() === 'd') {
+        setOverlay(null);
+        handleNav('Practice room');
+      }
+      else if (event.key === 'Escape') {
+        setOverlay(null);
+        setShortcutsOpen(false);
+      }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
@@ -423,6 +544,7 @@ function Home() {
             <div className="fc-header-actions">
               <button className="fc-icon-button fc-mobile-menu" onClick={() => setNotice('Use the workspace tabs on the left to move around Fusion Coach.')} aria-label="Open workspace navigation" data-testid="button-mobile-menu"><LayoutDashboard size={17} /></button>
               <button className="fc-icon-button" onClick={() => setNotice('Your practice data is stored locally in this demo workspace.')} aria-label="Privacy information" data-testid="button-privacy"><Sparkles size={17} /></button>
+              <button className="fc-icon-button" onClick={() => setShortcutsOpen(true)} aria-label="Open keyboard shortcuts" data-testid="button-shortcuts"><Keyboard size={17} /></button>
               <button className="fc-icon-button" onClick={() => handleNav('Settings')} aria-label="Open settings" data-testid="button-settings"><Settings2 size={17} /></button>
             </div>
           </header>
@@ -549,6 +671,23 @@ function Home() {
           </div>
         </main>
       </div>
+      {overlay && (
+        <InspectorOverlay
+          view={overlay}
+          stream={streamRef.current}
+          transcript={transcript}
+          frequencyData={frequencyData}
+          audioLevel={audioLevel}
+          speechWords={speechWords}
+          speechSeconds={speechSeconds}
+          score={score}
+          cameraEnabled={cameraEnabled}
+          micEnabled={micEnabled}
+          faceBox={faceBox}
+          faceRecognitionStatus={faceRecognitionStatus}
+          onClose={() => setOverlay(null)}
+        />
+      )}
       {shortcutsOpen && <ShortcutPanel onClose={() => setShortcutsOpen(false)} />}
     </div>
   );
@@ -690,12 +829,112 @@ function AuthGate({ step, name, faceScanState, onNameChange, onFaceId, onNewAcco
   );
 }
 
+function InspectorOverlay({ view, stream, transcript, frequencyData, audioLevel, speechWords, speechSeconds, score, cameraEnabled, micEnabled, faceBox, faceRecognitionStatus, onClose }: {
+  view: OverlayView;
+  stream: MediaStream | null;
+  transcript: string;
+  frequencyData: number[];
+  audioLevel: number;
+  speechWords: number;
+  speechSeconds: number;
+  score: number | null;
+  cameraEnabled: boolean;
+  micEnabled: boolean;
+  faceBox: FaceBox | null;
+  faceRecognitionStatus: 'unavailable' | 'searching' | 'detected';
+  onClose: () => void;
+}) {
+  const titles: Record<OverlayView, { eyebrow: string; title: string; description: string }> = {
+    'human-eye': { eyebrow: '01 / Human eye view', title: 'Raw camera signal', description: 'This is the unprocessed camera view. No score is inferred here.' },
+    ai: { eyebrow: '02 / AI view', title: 'Multimodal analysis', description: 'Every line below is labeled by what the browser can actually observe.' },
+    tracking: { eyebrow: '03 / AI tracking view', title: 'Tracking transparency', description: 'The overlay shows detected geometry when a browser detector is available.' },
+    transcript: { eyebrow: 'T / Transcript', title: 'Speech to text', description: 'Only final browser speech results are counted toward the sample.' },
+    frequency: { eyebrow: 'F / Frequency / audio', title: 'Audio frequency', description: 'Live microphone amplitude and frequency bins from the connected input.' },
+    scores: { eyebrow: 'S / Scores', title: 'Evidence and scores', description: 'Scores stay empty until the assessment has enough real input.' },
+  };
+  const header = titles[view];
+
+  return (
+    <div className="fc-inspector-backdrop" role="presentation" onClick={onClose}>
+      <div className="fc-inspector" role="dialog" aria-modal="true" aria-labelledby="inspector-title" onClick={(event) => event.stopPropagation()}>
+        <div className="fc-inspector-head">
+          <div><div className="fc-kicker">{header.eyebrow}</div><h2 id="inspector-title">{header.title}</h2><p>{header.description}</p></div>
+          <button className="fc-icon-button" onClick={onClose} aria-label="Close active overlay"><X size={17} /></button>
+        </div>
+
+        {view === 'human-eye' && (
+          <div className="fc-inspector-video-wrap">
+            {stream && cameraEnabled ? <video className="fc-inspector-video" autoPlay muted playsInline ref={(element) => { if (element) element.srcObject = stream; }} /> : <div className="fc-inspector-empty"><VideoOff size={26} /><span>No camera signal</span></div>}
+            <span className="fc-inspector-tag">RAW / HUMAN EYE</span>
+          </div>
+        )}
+
+        {view === 'ai' && (
+          <div className="fc-signal-table">
+            <SignalRow label="Camera input" value={cameraEnabled ? 'Connected' : 'Not connected'} detail={cameraEnabled ? 'Frames available to a detector' : 'No visual evidence'} tone={cameraEnabled ? 'good' : 'quiet'} />
+            <SignalRow label="Face presence" value={faceRecognitionStatus === 'detected' ? 'Face detected' : faceRecognitionStatus === 'searching' ? 'Searching' : 'Detector unavailable'} detail={faceBox ? `x ${Math.round(faceBox.x)}% · y ${Math.round(faceBox.y)}%` : 'No location returned'} tone={faceRecognitionStatus === 'detected' ? 'good' : 'quiet'} />
+            <SignalRow label="Microphone input" value={micEnabled ? 'Connected' : 'Not connected'} detail={`${Math.round(audioLevel * 100)}% current amplitude`} tone={micEnabled ? 'good' : 'quiet'} />
+            <SignalRow label="Speech to text" value={speechWords > 0 ? `${speechWords} words` : 'Waiting'} detail={transcript || 'No final transcript yet'} tone={speechWords > 0 ? 'good' : 'quiet'} />
+            <SignalRow label="Pose / hands" value="Model not connected" detail="No body landmark is claimed without a pose model" tone="quiet" />
+          </div>
+        )}
+
+        {view === 'tracking' && (
+          <div className="fc-tracking-view">
+            <div className="fc-tracking-canvas">
+              {stream && cameraEnabled ? <video className="fc-inspector-video" autoPlay muted playsInline ref={(element) => { if (element) element.srcObject = stream; }} /> : <div className="fc-inspector-empty"><VideoOff size={26} /><span>Turn on the camera to see tracking</span></div>}
+              {faceBox && <div className="fc-face-box" style={{ left: `${faceBox.x}%`, top: `${faceBox.y}%`, width: `${faceBox.width}%`, height: `${faceBox.height}%` }}><span>FACE / {Math.round(faceBox.width)}% W</span></div>}
+              <div className="fc-body-line" />
+              <div className="fc-tracking-label">{faceRecognitionStatus === 'detected' ? 'FACE LANDMARK SOURCE / BROWSER DETECTOR' : faceRecognitionStatus === 'searching' ? 'SEARCHING FOR FACE' : 'FACE MODEL UNAVAILABLE'}</div>
+            </div>
+            <div className="fc-tracking-readout">
+              <SignalRow label="Face" value={faceRecognitionStatus === 'detected' ? 'Located' : 'Not located'} detail={faceBox ? `x ${Math.round(faceBox.x)}% · y ${Math.round(faceBox.y)}% · ${Math.round(faceBox.width)}% × ${Math.round(faceBox.height)}%` : 'No bounding box available'} tone={faceRecognitionStatus === 'detected' ? 'good' : 'quiet'} />
+              <SignalRow label="Body / pose" value="Waiting for pose model" detail="The app will not draw a body skeleton from guessed coordinates." tone="quiet" />
+              <SignalRow label="Hands" value="Waiting for hand model" detail="No hand landmarks are being claimed." tone="quiet" />
+            </div>
+          </div>
+        )}
+
+        {view === 'transcript' && (
+          <div className="fc-transcript-panel">
+            <div className="fc-transcript-meta"><span>{speechWords} words captured</span><span>{Math.round(speechSeconds)}s voice activity</span></div>
+            <p>{transcript || 'No speech to text yet. Start an assessment and speak a complete thought.'}</p>
+            <div className="fc-transcript-note"><Info size={14} /> Browser speech recognition must be available for word-level transcription.</div>
+          </div>
+        )}
+
+        {view === 'frequency' && (
+          <div className="fc-frequency-panel">
+            <div className="fc-frequency-visual" aria-label="Live audio frequency visualization">{frequencyData.map((value, index) => <i key={index} style={{ height: `${Math.max(5, value / 2)}%` }} />)}</div>
+            <div className="fc-frequency-meta"><span>Amplitude <b>{Math.round(audioLevel * 100)}%</b></span><span>Microphone <b>{micEnabled ? 'connected' : 'off'}</b></span></div>
+          </div>
+        )}
+
+        {view === 'scores' && (
+          <div className="fc-score-inspector">
+            <div className="fc-evidence-score"><strong>{score ?? '—'}</strong><span>{score === null ? 'not scored' : 'signal coverage'}</span></div>
+            <div className="fc-signal-table">
+              <SignalRow label="Speech words" value={String(speechWords)} detail="Final words from browser speech-to-text" tone={speechWords > 0 ? 'good' : 'quiet'} />
+              <SignalRow label="Voice activity" value={`${Math.round(speechSeconds)}s`} detail="Microphone amplitude above the activity threshold" tone={speechSeconds > 0 ? 'good' : 'quiet'} />
+              <SignalRow label="Face location" value={faceBox ? 'Available' : 'Unavailable'} detail={faceBox ? 'Bounding box returned by browser detector' : 'No face coordinates available'} tone={faceBox ? 'good' : 'quiet'} />
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function SignalRow({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: 'good' | 'quiet' }) {
+  return <div className="fc-signal-row"><div className={`fc-signal-status ${tone}`} /><div className="fc-signal-copy"><b>{label}</b><span>{detail}</span></div><strong>{value}</strong></div>;
+}
+
 function ShortcutPanel({ onClose }: { onClose: () => void }) {
   return (
     <div className="fc-shortcut-backdrop" role="presentation" onClick={onClose}>
       <div className="fc-shortcut-panel" role="dialog" aria-modal="true" aria-labelledby="shortcut-title" onClick={(event) => event.stopPropagation()}>
         <div className="fc-card-head"><div><h3 className="fc-card-title" id="shortcut-title">Keyboard shortcuts</h3><span className="fc-card-meta">Available anywhere outside a text field</span></div><button className="fc-icon-button" onClick={onClose} aria-label="Close shortcuts"><X size={16} /></button></div>
-        <div className="fc-shortcut-list"><div><kbd>Space</kbd><span>Start or finish session</span></div><div><kbd>C</kbd><span>Toggle camera</span></div><div><kbd>M</kbd><span>Toggle microphone</span></div><div><kbd>1</kbd><span>Practice room</span></div><div><kbd>2</kbd><span>Session history</span></div><div><kbd>3</kbd><span>Progress</span></div><div><kbd>4</kbd><span>Settings</span></div><div><kbd>?</kbd><span>Show or hide shortcuts</span></div></div>
+        <div className="fc-shortcut-list"><div><kbd>1</kbd><span>Human Eye View</span></div><div><kbd>2</kbd><span>AI View</span></div><div><kbd>3</kbd><span>AI Tracking View</span></div><div><kbd>T</kbd><span>Transcript</span></div><div><kbd>F</kbd><span>Frequency / Audio</span></div><div><kbd>S</kbd><span>Scores</span></div><div><kbd>H</kbd><span>Shortcut Help</span></div><div><kbd>R</kbd><span>Restart assessment</span></div><div><kbd>P</kbd><span>Pause/resume</span></div><div><kbd>D</kbd><span>Dashboard</span></div><div><kbd>ESC</kbd><span>Close active overlay</span></div></div>
       </div>
     </div>
   );

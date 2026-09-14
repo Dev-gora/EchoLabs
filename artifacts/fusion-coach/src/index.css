@@ -293,6 +293,43 @@
 .fc-shortcut-list { display: grid; gap: 1px; padding: 0 22px 18px; }
 .fc-shortcut-list div { display: flex; align-items: center; justify-content: space-between; border-top: 1px solid #ebe5da; padding: 11px 0; color: #666b72; font-size: 12px; }
 kbd { min-width: 32px; border: 1px solid #d7d1c6; border-bottom-width: 2px; border-radius: 6px; padding: 4px 7px; background: #f7f3eb; color: #202536; font: 700 10px var(--app-font-mono); text-align: center; }
+.fc-inspector-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 22px; background: rgba(32,37,54,.58); backdrop-filter: blur(7px); }
+.fc-inspector { width: min(100%, 760px); max-height: min(850px, calc(100vh - 44px)); overflow: auto; border: 1px solid rgba(255,255,255,.14); border-radius: 20px; background: #fffaf3; box-shadow: 0 26px 80px rgba(0,0,0,.3); }
+.fc-inspector-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 27px 29px 21px; border-bottom: 1px solid #ebe5da; }
+.fc-inspector-head h2 { margin: 9px 0 7px; color: #202536; font: 700 29px/1 'Space Grotesk', sans-serif; letter-spacing: -.055em; }
+.fc-inspector-head p { max-width: 500px; margin: 0; color: #777b82; font-size: 12px; line-height: 1.5; }
+.fc-inspector-video-wrap, .fc-tracking-canvas { position: relative; min-height: 380px; margin: 22px 29px 29px; overflow: hidden; border-radius: 14px; background: #242a36; }
+.fc-inspector-video { display: block; width: 100%; height: 100%; min-height: 380px; object-fit: cover; transform: scaleX(-1); }
+.fc-inspector-tag { position: absolute; top: 16px; left: 16px; padding: 6px 8px; border-radius: 6px; background: rgba(32,37,54,.76); color: #c3df39; font: 9px var(--app-font-mono); letter-spacing: .08em; }
+.fc-inspector-empty { display: grid; min-height: 250px; place-items: center; align-content: center; gap: 10px; color: #9ca3a9; font: 10px var(--app-font-mono); text-transform: uppercase; letter-spacing: .08em; }
+.fc-signal-table { display: grid; gap: 1px; padding: 0 29px 25px; }
+.fc-signal-row { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 14px 0; border-top: 1px solid #ebe5da; }
+.fc-signal-status { width: 7px; height: 7px; border-radius: 50%; }
+.fc-signal-status.good { background: #8cae1a; box-shadow: 0 0 0 4px #e9f0bd; }
+.fc-signal-status.quiet { background: #bbb4a8; box-shadow: 0 0 0 4px #eee9df; }
+.fc-signal-copy b, .fc-signal-copy span { display: block; }
+.fc-signal-copy b { color: #333847; font-size: 12px; }
+.fc-signal-copy span { margin-top: 4px; overflow: hidden; color: #8b8d91; font-size: 10px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+.fc-signal-row > strong { color: #65710f; font: 10px var(--app-font-mono); text-align: right; }
+.fc-tracking-view { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(260px, .7fr); gap: 20px; padding: 0 29px 29px; }
+.fc-tracking-view .fc-tracking-canvas { min-height: 330px; margin: 0; }
+.fc-tracking-view .fc-inspector-video { min-height: 330px; }
+.fc-face-box { position: absolute; border: 1px solid #c3df39; box-shadow: 0 0 0 1px rgba(195,223,57,.35), 0 0 22px rgba(195,223,57,.15); }
+.fc-face-box span { position: absolute; top: -21px; left: -1px; padding: 4px 5px; background: #c3df39; color: #202536; font: 8px var(--app-font-mono); white-space: nowrap; }
+.fc-body-line { position: absolute; top: 25%; bottom: 8%; left: 50%; border-left: 1px dashed rgba(195,223,57,.35); transform: translateX(-50%); }
+.fc-tracking-label { position: absolute; left: 14px; bottom: 13px; color: rgba(255,255,255,.65); font: 9px var(--app-font-mono); letter-spacing: .07em; }
+.fc-tracking-readout { align-self: center; }
+.fc-transcript-panel, .fc-frequency-panel, .fc-score-inspector { padding: 22px 29px 29px; }
+.fc-transcript-meta, .fc-frequency-meta { display: flex; justify-content: space-between; gap: 14px; color: #6c741b; font: 10px var(--app-font-mono); text-transform: uppercase; letter-spacing: .06em; }
+.fc-transcript-panel > p { min-height: 170px; margin: 14px 0 16px; padding: 18px; border: 1px solid #ded8cb; border-radius: 12px; background: #fffdf9; color: #444955; font-size: 16px; line-height: 1.65; }
+.fc-transcript-note { display: flex; align-items: center; gap: 8px; color: #898b8e; font-size: 11px; }
+.fc-frequency-visual { display: flex; align-items: center; gap: 5px; height: 230px; padding: 18px 20px; border-radius: 14px; background: #242a36; }
+.fc-frequency-visual i { flex: 1; min-width: 4px; border-radius: 4px 4px 1px 1px; background: #c3df39; opacity: .9; transition: height .12s ease; }
+.fc-frequency-meta { margin-top: 14px; color: #85878a; text-transform: none; letter-spacing: 0; }
+.fc-frequency-meta b { color: #5d6911; }
+.fc-evidence-score { display: flex; align-items: baseline; gap: 13px; padding: 6px 0 20px; }
+.fc-evidence-score strong { color: #202536; font: 700 56px/1 'Space Grotesk', sans-serif; letter-spacing: -.08em; }
+.fc-evidence-score span { color: #85878a; font: 10px var(--app-font-mono); text-transform: uppercase; }
 @keyframes face-scan { 0%,100% { transform: scale(.96); opacity: .6; } 50% { transform: scale(1.04); opacity: 1; } }
 @media (max-width: 700px) {
   .fc-auth { padding: 15px; }
@@ -302,4 +339,13 @@ kbd { min-width: 32px; border: 1px solid #d7d1c6; border-bottom-width: 2px; bord
   .fc-page-heading h1 { font-size: 30px; }
   .fc-settings-grid, .fc-progress-grid, .fc-method-grid { grid-template-columns: 1fr; }
   .fc-progress-card { margin-top: 18px; }
+  .fc-inspector-backdrop { padding: 10px; }
+  .fc-inspector { max-height: calc(100vh - 20px); border-radius: 16px; }
+  .fc-inspector-head { padding: 22px 19px 17px; }
+  .fc-inspector-head h2 { font-size: 25px; }
+  .fc-inspector-video-wrap { min-height: 260px; margin: 18px 19px 19px; }
+  .fc-inspector-video-wrap .fc-inspector-video { min-height: 260px; }
+  .fc-tracking-view { grid-template-columns: 1fr; padding: 0 19px 19px; }
+  .fc-tracking-view .fc-tracking-canvas, .fc-tracking-view .fc-inspector-video { min-height: 250px; }
+  .fc-signal-table, .fc-transcript-panel, .fc-frequency-panel, .fc-score-inspector { padding-left: 19px; padding-right: 19px; }
 }
