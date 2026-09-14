@@ -1,0 +1,1 @@
+- [Evaluation integrity](evaluation-integrity.md) — keep signal presence, measured evidence, and communication quality separate; never score silence as performance.
