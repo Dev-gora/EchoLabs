@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Fusion Coach"
+description = "A browser-based communication coaching dashboard that visualizes camera and microphone input flowing through computer vision, speech analysis, fusion, scoring, live feedback, and session history."
+version = "1.0.0"
+id = "artifacts/fusion-coach"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 21348
+
+[services.development]
+run = "pnpm --filter @workspace/fusion-coach run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/fusion-coach", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/fusion-coach/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "21348"
+BASE_PATH = "/"
