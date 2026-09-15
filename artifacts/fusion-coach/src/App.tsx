@@ -34,6 +34,7 @@ import {
 } from 'lucide-react';
 import { type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { FaceDetector, FilesetResolver, HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -60,6 +61,7 @@ type AuthStep = 'chooser' | 'face-id' | 'new-account' | 'guest' | 'signed-in';
 type FaceScanState = 'idle' | 'scanning' | 'complete' | 'error';
 type OverlayView = 'human-eye' | 'ai' | 'tracking' | 'transcript' | 'frequency' | 'scores';
 type FaceBox = { x: number; y: number; width: number; height: number };
+type TrackerStatus = 'unavailable' | 'loading' | 'ready' | 'detected';
 
 type SpeechRecognitionLike = {
   continuous: boolean;
@@ -104,6 +106,8 @@ function Home() {
   const [frequencyData, setFrequencyData] = useState<number[]>(Array.from({ length: 24 }, () => 0));
   const [faceBox, setFaceBox] = useState<FaceBox | null>(null);
   const [faceRecognitionStatus, setFaceRecognitionStatus] = useState<'unavailable' | 'searching' | 'detected'>('unavailable');
+  const [poseStatus, setPoseStatus] = useState<TrackerStatus>('unavailable');
+  const [handStatus, setHandStatus] = useState<TrackerStatus>('unavailable');
   const [history, setHistory] = useState(initialHistory);
   const [notice, setNotice] = useState('');
   const [activeNav, setActiveNav] = useState('Practice room');
@@ -116,8 +120,10 @@ function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const audioFrameRef = useRef<number | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
-  const faceDetectorRef = useRef<{ detect: (source: HTMLVideoElement) => Promise<Array<{ boundingBox: DOMRectReadOnly }>> } | null>(null);
-  const faceFrameRef = useRef<number | null>(null);
+  const trackingRef = useRef<{ face: FaceDetector; pose: PoseLandmarker; hands: HandLandmarker } | null>(null);
+  const trackingFrameRef = useRef<number | null>(null);
+  const trackingBusyRef = useRef(false);
+  const lastTrackingTimeRef = useRef(0);
   const faceRecognitionStatusRef = useRef<'unavailable' | 'searching' | 'detected'>('unavailable');
 
   useEffect(() => {
@@ -148,67 +154,121 @@ function Home() {
     if (videoRef.current && streamRef.current) {
       videoRef.current.srcObject = streamRef.current;
       void videoRef.current.play().catch(() => undefined);
-      startFaceDetection();
+      startTracking();
     } else {
-      stopFaceDetection();
+      stopTracking();
     }
   }, [cameraEnabled]);
 
   useEffect(() => () => {
     recognitionRef.current?.stop();
     if (audioFrameRef.current) window.cancelAnimationFrame(audioFrameRef.current);
-    if (faceFrameRef.current) window.cancelAnimationFrame(faceFrameRef.current);
+    if (trackingFrameRef.current) window.cancelAnimationFrame(trackingFrameRef.current);
     void audioContextRef.current?.close();
     streamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
 
-  const startFaceDetection = () => {
-    const faceWindow = window as typeof window & {
-      FaceDetector?: new (options?: { fastMode?: boolean; maxDetectedFaces?: number }) => {
-        detect: (source: HTMLVideoElement) => Promise<Array<{ boundingBox: DOMRectReadOnly }>>;
-      };
-    };
-    const FaceDetectorConstructor = faceWindow.FaceDetector;
-    if (!FaceDetectorConstructor || !videoRef.current) {
+  const startTracking = () => {
+    stopTracking();
+    if (!videoRef.current) {
       setFaceRecognitionStatus('unavailable');
+      setPoseStatus('unavailable');
+      setHandStatus('unavailable');
       return;
     }
-    const detector = new FaceDetectorConstructor({ fastMode: true, maxDetectedFaces: 1 });
-    faceDetectorRef.current = detector;
     setFaceRecognitionStatus('searching');
+    setPoseStatus('loading');
+    setHandStatus('loading');
+    void (async () => {
+      try {
+        const vision = await FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/wasm',
+        );
+        const [face, pose, hands] = await Promise.all([
+          FaceDetector.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite',
+            },
+            runningMode: 'VIDEO',
+            minDetectionConfidence: 0.5,
+          }),
+          PoseLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
+            },
+            runningMode: 'VIDEO',
+            numPoses: 1,
+            minPoseDetectionConfidence: 0.5,
+          }),
+          HandLandmarker.createFromOptions(vision, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+            },
+            runningMode: 'VIDEO',
+            numHands: 2,
+            minHandDetectionConfidence: 0.5,
+          }),
+        ]);
+        trackingRef.current = { face, pose, hands };
+        setPoseStatus('ready');
+        setHandStatus('ready');
 
-    const detect = async () => {
-      const video = videoRef.current;
-      if (!video || !faceDetectorRef.current) return;
-      if (video.readyState >= 2 && video.videoWidth > 0) {
-        try {
-          const faces = await detector.detect(video);
-          const bounds = faces[0]?.boundingBox;
-          if (bounds) {
-            setFaceBox({
-              x: 100 - ((bounds.x + bounds.width) / video.videoWidth) * 100,
-              y: (bounds.y / video.videoHeight) * 100,
-              width: (bounds.width / video.videoWidth) * 100,
-              height: (bounds.height / video.videoHeight) * 100,
-            });
-            setFaceRecognitionStatus('detected');
-          } else {
-            setFaceBox(null);
-            setFaceRecognitionStatus('searching');
+        const detect = () => {
+          const video = videoRef.current;
+          const trackers = trackingRef.current;
+          if (!video || !trackers) return;
+          if (video.readyState >= 2 && video.videoWidth > 0 && !trackingBusyRef.current && performance.now() - lastTrackingTimeRef.current > 90) {
+            trackingBusyRef.current = true;
+            lastTrackingTimeRef.current = performance.now();
+            try {
+              const timestamp = Math.round(lastTrackingTimeRef.current);
+              const faceResult = trackers.face.detectForVideo(video, timestamp);
+              const face = faceResult.detections[0]?.boundingBox;
+              if (face) {
+                setFaceBox({
+                  x: 100 - ((face.originX + face.width) / video.videoWidth) * 100,
+                  y: (face.originY / video.videoHeight) * 100,
+                  width: (face.width / video.videoWidth) * 100,
+                  height: (face.height / video.videoHeight) * 100,
+                });
+                setFaceRecognitionStatus('detected');
+              } else {
+                setFaceBox(null);
+                setFaceRecognitionStatus('searching');
+              }
+              const poseResult = trackers.pose.detectForVideo(video, timestamp);
+              setPoseStatus(poseResult.landmarks[0]?.length ? 'detected' : 'ready');
+              const handResult = trackers.hands.detectForVideo(video, timestamp);
+              setHandStatus(handResult.landmarks[0]?.length ? 'detected' : 'ready');
+            } catch {
+              setFaceRecognitionStatus('unavailable');
+              setPoseStatus('unavailable');
+              setHandStatus('unavailable');
+            } finally {
+              trackingBusyRef.current = false;
+            }
           }
-        } catch {
-          setFaceRecognitionStatus('unavailable');
-        }
+          trackingFrameRef.current = window.requestAnimationFrame(detect);
+        };
+        detect();
+      } catch {
+        trackingRef.current = null;
+        setFaceRecognitionStatus('unavailable');
+        setPoseStatus('unavailable');
+        setHandStatus('unavailable');
       }
-      faceFrameRef.current = window.requestAnimationFrame(() => void detect());
-    };
-    void detect();
+    })();
   };
 
-  const stopFaceDetection = () => {
-    if (faceFrameRef.current) window.cancelAnimationFrame(faceFrameRef.current);
-    faceFrameRef.current = null;
-    faceDetectorRef.current = null;
+  const stopTracking = () => {
+    if (trackingFrameRef.current) window.cancelAnimationFrame(trackingFrameRef.current);
+    trackingFrameRef.current = null;
+    trackingRef.current?.face.close();
+    trackingRef.current?.pose.close();
+    trackingRef.current?.hands.close();
+    trackingRef.current = null;
+    setPoseStatus('unavailable');
+    setHandStatus('unavailable');
     setFaceBox(null);
     setFaceRecognitionStatus('unavailable');
   };
@@ -685,6 +745,8 @@ function Home() {
           micEnabled={micEnabled}
           faceBox={faceBox}
           faceRecognitionStatus={faceRecognitionStatus}
+           poseStatus={poseStatus}
+           handStatus={handStatus}
           onClose={() => setOverlay(null)}
         />
       )}
@@ -829,7 +891,7 @@ function AuthGate({ step, name, faceScanState, onNameChange, onFaceId, onNewAcco
   );
 }
 
-function InspectorOverlay({ view, stream, transcript, frequencyData, audioLevel, speechWords, speechSeconds, score, cameraEnabled, micEnabled, faceBox, faceRecognitionStatus, onClose }: {
+function InspectorOverlay({ view, stream, transcript, frequencyData, audioLevel, speechWords, speechSeconds, score, cameraEnabled, micEnabled, faceBox, faceRecognitionStatus, poseStatus, handStatus, onClose }: {
   view: OverlayView;
   stream: MediaStream | null;
   transcript: string;
@@ -842,6 +904,8 @@ function InspectorOverlay({ view, stream, transcript, frequencyData, audioLevel,
   micEnabled: boolean;
   faceBox: FaceBox | null;
   faceRecognitionStatus: 'unavailable' | 'searching' | 'detected';
+  poseStatus: TrackerStatus;
+  handStatus: TrackerStatus;
   onClose: () => void;
 }) {
   const titles: Record<OverlayView, { eyebrow: string; title: string; description: string }> = {
@@ -875,7 +939,8 @@ function InspectorOverlay({ view, stream, transcript, frequencyData, audioLevel,
             <SignalRow label="Face presence" value={faceRecognitionStatus === 'detected' ? 'Face detected' : faceRecognitionStatus === 'searching' ? 'Searching' : 'Detector unavailable'} detail={faceBox ? `x ${Math.round(faceBox.x)}% · y ${Math.round(faceBox.y)}%` : 'No location returned'} tone={faceRecognitionStatus === 'detected' ? 'good' : 'quiet'} />
             <SignalRow label="Microphone input" value={micEnabled ? 'Connected' : 'Not connected'} detail={`${Math.round(audioLevel * 100)}% current amplitude`} tone={micEnabled ? 'good' : 'quiet'} />
             <SignalRow label="Speech to text" value={speechWords > 0 ? `${speechWords} words` : 'Waiting'} detail={transcript || 'No final transcript yet'} tone={speechWords > 0 ? 'good' : 'quiet'} />
-            <SignalRow label="Pose / hands" value="Model not connected" detail="No body landmark is claimed without a pose model" tone="quiet" />
+            <SignalRow label="Body / pose" value={trackingStatusLabel(poseStatus)} detail={trackingStatusDetail(poseStatus, 'body landmarks')} tone={poseStatus === 'detected' ? 'good' : 'quiet'} />
+            <SignalRow label="Hands" value={trackingStatusLabel(handStatus)} detail={trackingStatusDetail(handStatus, 'hand landmarks')} tone={handStatus === 'detected' ? 'good' : 'quiet'} />
           </div>
         )}
 
@@ -885,12 +950,12 @@ function InspectorOverlay({ view, stream, transcript, frequencyData, audioLevel,
               {stream && cameraEnabled ? <video className="fc-inspector-video" autoPlay muted playsInline ref={(element) => { if (element) element.srcObject = stream; }} /> : <div className="fc-inspector-empty"><VideoOff size={26} /><span>Turn on the camera to see tracking</span></div>}
               {faceBox && <div className="fc-face-box" style={{ left: `${faceBox.x}%`, top: `${faceBox.y}%`, width: `${faceBox.width}%`, height: `${faceBox.height}%` }}><span>FACE / {Math.round(faceBox.width)}% W</span></div>}
               <div className="fc-body-line" />
-              <div className="fc-tracking-label">{faceRecognitionStatus === 'detected' ? 'FACE LANDMARK SOURCE / BROWSER DETECTOR' : faceRecognitionStatus === 'searching' ? 'SEARCHING FOR FACE' : 'FACE MODEL UNAVAILABLE'}</div>
+              <div className="fc-tracking-label">{faceRecognitionStatus === 'detected' ? 'FACE LANDMARK SOURCE / MEDIAPIPE' : faceRecognitionStatus === 'searching' ? 'LOADING OR SEARCHING FOR FACE' : 'FACE MODEL UNAVAILABLE'}</div>
             </div>
             <div className="fc-tracking-readout">
               <SignalRow label="Face" value={faceRecognitionStatus === 'detected' ? 'Located' : 'Not located'} detail={faceBox ? `x ${Math.round(faceBox.x)}% · y ${Math.round(faceBox.y)}% · ${Math.round(faceBox.width)}% × ${Math.round(faceBox.height)}%` : 'No bounding box available'} tone={faceRecognitionStatus === 'detected' ? 'good' : 'quiet'} />
-              <SignalRow label="Body / pose" value="Waiting for pose model" detail="The app will not draw a body skeleton from guessed coordinates." tone="quiet" />
-              <SignalRow label="Hands" value="Waiting for hand model" detail="No hand landmarks are being claimed." tone="quiet" />
+              <SignalRow label="Body / pose" value={trackingStatusLabel(poseStatus)} detail={trackingStatusDetail(poseStatus, 'body landmarks')} tone={poseStatus === 'detected' ? 'good' : 'quiet'} />
+              <SignalRow label="Hands" value={trackingStatusLabel(handStatus)} detail={trackingStatusDetail(handStatus, 'hand landmarks')} tone={handStatus === 'detected' ? 'good' : 'quiet'} />
             </div>
           </div>
         )}
@@ -927,6 +992,20 @@ function InspectorOverlay({ view, stream, transcript, frequencyData, audioLevel,
 
 function SignalRow({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: 'good' | 'quiet' }) {
   return <div className="fc-signal-row"><div className={`fc-signal-status ${tone}`} /><div className="fc-signal-copy"><b>{label}</b><span>{detail}</span></div><strong>{value}</strong></div>;
+}
+
+function trackingStatusLabel(status: TrackerStatus) {
+  if (status === 'detected') return 'Detected';
+  if (status === 'ready') return 'Ready';
+  if (status === 'loading') return 'Loading model';
+  return 'Model unavailable';
+}
+
+function trackingStatusDetail(status: TrackerStatus, signal: string) {
+  if (status === 'detected') return `${signal} returned in the latest camera frame`;
+  if (status === 'ready') return `Model loaded; move into frame to detect ${signal}`;
+  if (status === 'loading') return `Loading ${signal} model from MediaPipe`;
+  return `No ${signal} model is available`;
 }
 
 function ShortcutPanel({ onClose }: { onClose: () => void }) {
