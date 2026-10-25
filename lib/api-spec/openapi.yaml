@@ -1,6 +1,5 @@
 openapi: 3.1.0
 info:
-  # Do not change the title, if the title changes, the import paths will be broken
   title: Api
   version: 0.1.0
   description: API specification
@@ -10,6 +9,10 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: analyze
+    description: Recording analysis operations
+  - name: speech
+    description: Local transcription and deterministic speech metrics
 paths:
   /healthz:
     get:
@@ -24,8 +27,224 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /analyze:
+    post:
+      operationId: analyzeRecording
+      tags: [analyze]
+      summary: Analyze a spoken answer
+      description: >-
+        Compute delivery metrics and indicator scores from a transcript captured in
+        the browser and the measured duration of the recording.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AnalyzeRequest"
+      responses:
+        "200":
+          description: Analysis result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyzeResponse"
+        "400":
+          description: Invalid request
+        "422":
+          description: Not enough speech to analyze
+  /analyze/{id}:
+    get:
+      operationId: getAnalysis
+      tags: [analyze]
+      summary: Fetch a stored analysis
+      description: Returns a previously computed analysis by session id
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Stored analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnalyzeResponse"
+        "404":
+          description: Unknown session
+  /analyze/retry:
+    post:
+      operationId: retryAnalysis
+      tags: [analyze]
+      summary: Retry analysis of a previous session
+      description: Reanalyze a recording and return a side-by-side comparison
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RetryAnalysisRequest"
+      responses:
+        "200":
+          description: Retry comparison
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RetryResponse"
+        "400":
+          description: Invalid request
+  /analyze/ideal:
+    post:
+      operationId: generateIdealAnswer
+      tags: [analyze]
+      summary: Generate an ideal answer
+      description: Rewrite the transcript into a polished example response
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IdealAnswerRequest"
+      responses:
+        "200":
+          description: Ideal answer
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdealAnswerResponse"
+        "503":
+          description: LLM unavailable
+  /transcribe:
+    post:
+      operationId: transcribeRecording
+      tags: [speech]
+      summary: Transcribe a recording
+      description: >-
+        Sends the recorded audio to the local faster-whisper service and returns the
+        transcript, per-word timings, the true audio duration and its metrics.
+      parameters:
+        - name: X-Audio-Filename
+          in: header
+          required: true
+          schema:
+            type: string
+          description: File name with an allowed extension (wav, webm, mp3, m4a, ogg, flac)
+      requestBody:
+        required: true
+        content:
+          audio/webm:
+            schema:
+              type: string
+              format: binary
+          audio/wav:
+            schema:
+              type: string
+              format: binary
+          audio/mpeg:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "200":
+          description: Transcription with word timings
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranscribeResponse"
+        "400":
+          description: Invalid format or empty upload
+        "413":
+          description: Upload too large
+        "422":
+          description: No speech, or a duration outside the allowed bounds
+        "503":
+          description: Transcription service unavailable
+  /analyze/metrics:
+    post:
+      operationId: computeSpeechMetrics
+      tags: [analyze]
+      summary: Compute deterministic metrics
+      description: >-
+        Re-scores a transcript without a language model. Word timings are optional; when
+        they are missing, or no longer match the text after an edit, the pause,
+        articulation and rhythm figures come back as null instead of being estimated.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MetricsRequest"
+      responses:
+        "200":
+          description: Metrics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  metrics:
+                    $ref: "#/components/schemas/SpeechMetrics"
+                required: [metrics]
+        "400":
+          description: Invalid request
 components:
   schemas:
+    AnalyzeRequest:
+      type: object
+      description: >-
+        A spoken answer as captured by the client. `segments` are optional speech
+        spans used to detect pauses; omit them when the client cannot provide them.
+      properties:
+        transcript:
+          type: string
+        duration:
+          type: number
+          description: Length of the recording in seconds
+        audio_url:
+          type: string
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/SpeechSegment"
+      required:
+        - transcript
+        - duration
+    RetryAnalysisRequest:
+      type: object
+      properties:
+        session_id:
+          type: string
+        transcript:
+          type: string
+        duration:
+          type: number
+      required:
+        - session_id
+        - transcript
+        - duration
+    IdealAnswerRequest:
+      type: object
+      properties:
+        transcript:
+          type: string
+        prompt_text:
+          type: string
+        user_level:
+          type: string
+      required:
+        - transcript
+        - prompt_text
+    SpeechSegment:
+      type: object
+      properties:
+        start:
+          type: number
+        end:
+          type: number
+      required:
+        - start
+        - end
     HealthStatus:
       type: object
       properties:
@@ -33,4 +252,203 @@ components:
           type: string
       required:
         - status
-
+    MetricsResponse:
+      type: object
+      properties:
+        wpm:
+          type: number
+        fillers:
+          type: integer
+        pauses:
+          type: integer
+        word_count:
+          type: integer
+        duration:
+          type: number
+      required:
+        - wpm
+        - fillers
+        - pauses
+        - word_count
+        - duration
+    ScoresResponse:
+      type: object
+      properties:
+        fluency:
+          type: integer
+        vocabulary:
+          type: integer
+        grammar:
+          type: integer
+        structure:
+          type: integer
+      required:
+        - fluency
+        - vocabulary
+        - grammar
+        - structure
+    AttemptSnapshot:
+      type: object
+      properties:
+        wpm:
+          type: number
+        fillers:
+          type: integer
+        pauses:
+          type: integer
+        fluency_score:
+          type: integer
+      required:
+        - wpm
+        - fillers
+        - pauses
+        - fluency_score
+    RetryComparison:
+      type: object
+      properties:
+        original_attempt:
+          $ref: "#/components/schemas/AttemptSnapshot"
+        current_attempt:
+          $ref: "#/components/schemas/AttemptSnapshot"
+        improvements:
+          type: object
+          additionalProperties:
+            type: string
+      required:
+        - original_attempt
+        - current_attempt
+        - improvements
+    AnalyzeResponse:
+      type: object
+      properties:
+        session_id:
+          type: string
+        audio_url:
+          type: string
+        transcript:
+          type: string
+        duration:
+          type: number
+        metrics:
+          $ref: "#/components/schemas/MetricsResponse"
+        scores:
+          $ref: "#/components/schemas/ScoresResponse"
+        feedback:
+          type: array
+          items:
+            type: string
+        grammar_mistakes:
+          type: array
+          items:
+            type: string
+      required:
+        - session_id
+        - audio_url
+        - transcript
+        - duration
+        - metrics
+        - scores
+        - feedback
+        - grammar_mistakes
+    RetryResponse:
+      allOf:
+        - $ref: "#/components/schemas/AnalyzeResponse"
+        - type: object
+          properties:
+            comparison:
+              $ref: "#/components/schemas/RetryComparison"
+          required:
+            - comparison
+    IdealAnswerResponse:
+      type: object
+      properties:
+        ideal_answer:
+          type: string
+        ideal_answer_audio_url:
+          type: string
+      required:
+        - ideal_answer
+    WordTiming:
+      type: object
+      properties:
+        word: { type: string }
+        start: { type: number }
+        end: { type: number }
+      required: [word, start, end]
+    FillerReport:
+      type: object
+      properties:
+        scored: { type: integer }
+        possible: { type: integer }
+        scored_terms:
+          type: object
+          additionalProperties: { type: integer }
+        possible_terms:
+          type: object
+          additionalProperties: { type: integer }
+      required: [scored, possible, scored_terms, possible_terms]
+    PauseReport:
+      type: object
+      properties:
+        threshold_sec: { type: number }
+        count: { type: integer }
+        total_sec: { type: number }
+        average_sec: { type: number }
+        longest_sec: { type: number }
+      required: [threshold_sec, count, total_sec, average_sec, longest_sec]
+    SpeechMetrics:
+      type: object
+      description: >-
+        Deterministic, transcript-derived measurements. null means the signal could not
+        be measured (no timings, no audio duration, no speech) and must not be shown
+        as a number.
+      properties:
+        word_count: { type: integer }
+        duration_sec: { type: [number, "null"] }
+        wpm: { type: [number, "null"] }
+        articulation_rate: { type: [number, "null"] }
+        speaking_time_sec: { type: [number, "null"] }
+        pauses:
+          oneOf:
+            - $ref: "#/components/schemas/PauseReport"
+            - type: "null"
+        fillers:
+          $ref: "#/components/schemas/FillerReport"
+        lexical_diversity: { type: [number, "null"] }
+        sentence_count: { type: integer }
+        average_sentence_words: { type: [number, "null"] }
+        used_word_timings: { type: boolean }
+      required:
+        - word_count
+        - duration_sec
+        - wpm
+        - articulation_rate
+        - speaking_time_sec
+        - pauses
+        - fillers
+        - lexical_diversity
+        - sentence_count
+        - average_sentence_words
+        - used_word_timings
+    MetricsRequest:
+      type: object
+      properties:
+        transcript: { type: string }
+        duration_sec: { type: number }
+        words:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordTiming"
+      required: [transcript]
+    TranscribeResponse:
+      type: object
+      properties:
+        transcript: { type: string }
+        words:
+          type: array
+          items:
+            $ref: "#/components/schemas/WordTiming"
+        duration_sec: { type: number }
+        metrics:
+          $ref: "#/components/schemas/SpeechMetrics"
+      required: [transcript, words, duration_sec, metrics]
