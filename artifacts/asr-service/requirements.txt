@@ -1,0 +1,5 @@
+# Local speech-to-text. faster-whisper brings ctranslate2 (CPU/GPU kernels) and
+# av (bundled FFmpeg libraries, so no system ffmpeg is required).
+faster-whisper>=1.1,<2
+fastapi>=0.115
+uvicorn[standard]>=0.30
