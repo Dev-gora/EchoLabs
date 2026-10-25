@@ -21,7 +21,6 @@ import {
   MicOff,
   MoreHorizontal,
   Play,
-  ScanFace,
   Settings2,
   Sparkles,
   Target,
@@ -33,13 +32,23 @@ import {
   UserRound,
   Users,
 } from 'lucide-react';
-import { type ReactNode, type RefObject } from 'react';
+import { type CSSProperties, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { FaceDetector, FilesetResolver, HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
 import { ErrorBoundary } from '@/components/error-boundary';
+import VoiceLab from '@/components/voice-lab';
+import { requestDeliveryRead, type DeliveryRead } from '@/lib/delivery';
+import {
+  MONITOR_CONFIG,
+  RealtimeVoiceMonitor,
+  type MonitorSnapshot,
+  type VoiceAlert,
+  type VoiceSummary,
+} from '@/lib/realtime-monitor';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
+import Intro from '@/pages/intro';
 import {
   Route,
   Switch,
@@ -58,13 +67,24 @@ type HistoryItem = {
   label: string;
 };
 
-type AuthStep = 'chooser' | 'face-id' | 'new-account' | 'guest' | 'signed-in';
-type FaceScanState = 'idle' | 'scanning' | 'complete' | 'error';
+type AuthStep = 'chooser' | 'new-account' | 'guest' | 'signed-in';
 type OverlayView = 'human-eye' | 'ai' | 'tracking' | 'transcript' | 'frequency' | 'scores';
 type FaceBox = { x: number; y: number; width: number; height: number };
 type TrackerStatus = 'unavailable' | 'loading' | 'ready' | 'detected';
 type LandmarkPoint = { x: number; y: number; z?: number; visibility?: number };
 type ReviewMarker = { time: number; label: string; kind: 'good' | 'issue' };
+type ScoreBreakdown = {
+  base: number;
+  issueDeduction: number;
+  final: number;
+  reason: string;
+  unmet: string[];
+  wordRate: number;
+  scored: boolean;
+};
+
+/** Seconds one realtime alert stays visible on screen. */
+const ALERT_VISIBLE_MS = 3000;
 
 type SpeechRecognitionLike = {
   continuous: boolean;
@@ -90,11 +110,16 @@ const stages = [
   { label: 'Feedback', sub: 'next best move', icon: Lightbulb },
 ];
 
+// Evidence thresholds: a session is only scored once all of these are met.
+const MIN_SPEECH_WORDS = 40;
+const MIN_SPEECH_SECONDS = 20;
+const MIN_SESSION_SECONDS = 30;
+const MIC_ACTIVE_THRESHOLD = 0.045;
+
 function Home() {
   const [authStep, setAuthStep] = useState<AuthStep>('chooser');
   const [identityName, setIdentityName] = useState('');
   const [nameDraft, setNameDraft] = useState('');
-  const [faceScanState, setFaceScanState] = useState<FaceScanState>('idle');
   const [active, setActive] = useState(false);
   const [completed, setCompleted] = useState(false);
   const [cameraEnabled, setCameraEnabled] = useState(false);
@@ -124,8 +149,13 @@ function Home() {
   const [recordingUrl, setRecordingUrl] = useState<string | null>(null);
   const [recordingDuration, setRecordingDuration] = useState(0);
   const [reviewMarkers, setReviewMarkers] = useState<ReviewMarker[]>([]);
+  const [scoreBreakdown, setScoreBreakdown] = useState<ScoreBreakdown | null>(null);
+  const [delivery, setDelivery] = useState<DeliveryRead | null>(null);
+  const [monitorSnapshot, setMonitorSnapshot] = useState<MonitorSnapshot | null>(null);
+  const [voiceSummary, setVoiceSummary] = useState<VoiceSummary | null>(null);
+  const [voiceAlerts, setVoiceAlerts] = useState<VoiceAlert[]>([]);
+  const [liveAlert, setLiveAlert] = useState<VoiceAlert | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const faceIdVideoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const activeRef = useRef(false);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -145,7 +175,14 @@ function Home() {
   const recordingChunksRef = useRef<Blob[]>([]);
   const silenceStartedRef = useRef<number | null>(null);
   const lastPauseMarkerRef = useRef(-10);
+  const prevFrameAtRef = useRef(0);
   const processedSpeechResultsRef = useRef(0);
+  const monitorRef = useRef<RealtimeVoiceMonitor | null>(null);
+  const monitorAnalyserRef = useRef<AnalyserNode | null>(null);
+  // `getFloatTimeDomainData` requires a non-shared backing buffer.
+  const monitorFrameRef = useRef<Float32Array<ArrayBuffer> | null>(null);
+  const monitorSnapshotAtRef = useRef(0);
+  const monitorAudioClockRef = useRef(-1);
 
   useEffect(() => {
     const savedName = window.localStorage.getItem('fusion-coach.identity');
@@ -176,7 +213,13 @@ function Home() {
   }, [active, paused]);
 
   useEffect(() => {
-    const video = videoRef.current ?? faceIdVideoRef.current;
+    if (!liveAlert) return;
+    const timer = window.setTimeout(() => setLiveAlert(null), ALERT_VISIBLE_MS);
+    return () => window.clearTimeout(timer);
+  }, [liveAlert]);
+
+  useEffect(() => {
+    const video = videoRef.current;
     if (video && streamRef.current) {
       video.srcObject = streamRef.current;
       void video.play().catch(() => undefined);
@@ -197,7 +240,7 @@ function Home() {
 
   const startTracking = () => {
     stopTracking();
-    if (!videoRef.current && !faceIdVideoRef.current) {
+    if (!videoRef.current) {
       setFaceRecognitionStatus('unavailable');
       setPoseStatus('unavailable');
       setHandStatus('unavailable');
@@ -241,7 +284,7 @@ function Home() {
         setHandStatus('ready');
 
         const detect = () => {
-          const video = videoRef.current ?? faceIdVideoRef.current;
+          const video = videoRef.current;
           const trackers = trackingRef.current;
           if (!video || !trackers) return;
           if (video.readyState >= 2 && video.videoWidth > 0 && !trackingBusyRef.current && performance.now() - lastTrackingTimeRef.current > 90) {
@@ -360,6 +403,8 @@ function Home() {
     mediaRecorderRef.current = null;
   };
 
+  const audioMonitorGenerationRef = useRef(0);
+
   const startAudioMonitor = (stream: MediaStream) => {
     const AudioContextConstructor = window.AudioContext;
     if (!AudioContextConstructor || stream.getAudioTracks().length === 0) return;
@@ -367,26 +412,67 @@ function Home() {
     const context = new AudioContextConstructor();
     const analyser = context.createAnalyser();
     analyser.fftSize = 256;
-    context.createMediaStreamSource(stream).connect(analyser);
+    // The realtime monitor needs a longer window than the level meter: pitch
+    // autocorrelation is only meaningful from ~43ms of samples upward.
+    const monitorAnalyser = context.createAnalyser();
+    monitorAnalyser.fftSize = MONITOR_CONFIG.frameSize;
+    const source = context.createMediaStreamSource(stream);
+    source.connect(analyser);
+    source.connect(monitorAnalyser);
+    monitorAnalyserRef.current = monitorAnalyser;
+    monitorFrameRef.current = new Float32Array(MONITOR_CONFIG.frameSize);
+    monitorAudioClockRef.current = -1;
     const data = new Uint8Array(analyser.fftSize);
     const frequencies = new Uint8Array(analyser.frequencyBinCount);
     audioContextRef.current = context;
+    // Invalidate any previous sampling loop so exactly one monitor is alive —
+    // stale loops kept reading a closed context (frozen level, ghost double-count).
+    const generation = ++audioMonitorGenerationRef.current;
 
     const sample = () => {
-      if (!audioContextRef.current) return;
+      if (audioMonitorGenerationRef.current !== generation) return;
       analyser.getByteTimeDomainData(data);
       const level = Math.sqrt(data.reduce((total, value) => total + ((value - 128) / 128) ** 2, 0) / data.length);
       setAudioLevel(level);
       analyser.getByteFrequencyData(frequencies);
       setFrequencyData(Array.from(frequencies.slice(0, 24)));
       const now = performance.now();
-      if (activeRef.current && level > 0.045) {
-        setSpeechSeconds((current) => current + 0.05);
+      // Time since the previous audio frame, capped so a stalled tab or long
+      // hiccup can never credit more than 0.25s of voice in a single frame.
+      const frameDelta = prevFrameAtRef.current > 0
+        ? Math.min(0.25, Math.max(0, (now - prevFrameAtRef.current) / 1000))
+        : 0;
+      prevFrameAtRef.current = now;
+      const monitor = monitorRef.current;
+      const monitorFrame = monitorFrameRef.current;
+      // Credit the monitor with time actually elapsed on the audio clock rather
+      // than the analyser window length: this loop can run at any frame rate, so
+      // a fixed per-frame duration would fast-forward a throttled or 60fps tab.
+      const monitorDelta = monitorAudioClockRef.current >= 0
+        ? Math.min(0.25, Math.max(0, context.currentTime - monitorAudioClockRef.current))
+        : 0;
+      monitorAudioClockRef.current = context.currentTime;
+      if (activeRef.current && monitor && monitorFrame && monitorDelta > 0) {
+        monitorAnalyser.getFloatTimeDomainData(monitorFrame);
+        const raised = monitor.pushFrame(monitorFrame, context.sampleRate, monitorDelta);
+        if (raised.length) {
+          setVoiceAlerts((current) => [...current, ...raised].slice(-40));
+          setLiveAlert(raised[raised.length - 1]);
+        }
+        if (now - monitorSnapshotAtRef.current > 250) {
+          monitorSnapshotAtRef.current = now;
+          setMonitorSnapshot(monitor.snapshot());
+        }
+      }
+      if (activeRef.current && level > MIC_ACTIVE_THRESHOLD) {
+        if (frameDelta > 0) {
+          setSpeechSeconds((current) => current + frameDelta);
+        }
         silenceStartedRef.current = null;
       } else if (activeRef.current) {
         silenceStartedRef.current ??= now;
-        if (silenceStartedRef.current && now - silenceStartedRef.current > 1200 && elapsedRef.current - lastPauseMarkerRef.current > 2) {
-          addReviewMarker(Math.max(0, elapsedRef.current - 1), 'Pause / silence', 'issue');
+        if (silenceStartedRef.current && now - silenceStartedRef.current > 2500 && elapsedRef.current - lastPauseMarkerRef.current > 8) {
+          addReviewMarker(Math.max(0, elapsedRef.current - 1), 'Extended pause', 'issue');
           lastPauseMarkerRef.current = elapsedRef.current;
         }
       }
@@ -467,7 +553,7 @@ function Home() {
       setMicEnabled(stream.getAudioTracks().length > 0);
       setPermissionDenied(false);
       startAudioMonitor(stream);
-      setNotice('Camera and microphone are connected. Your practice stays in this browser.');
+      setNotice('Camera and microphone are connected. Audio and video stay on this device; only the finished transcript is sent for scoring.');
     } catch {
       setPermissionDenied(true);
       setNotice('Device access was not granted. Demo mode is on — you can still practice the full loop.');
@@ -501,23 +587,59 @@ function Home() {
       stopSpeechCapture();
       stopRecording();
       setCompleted(true);
-      const hasEvidence = cameraEnabled && micEnabled && speechWords > 0 && speechSeconds >= 1;
+      const sessionSeconds = Math.max(1, elapsed);
+      const unmet: string[] = [];
+      if (!cameraEnabled) unmet.push('camera signal');
+      if (!micEnabled) unmet.push('microphone signal');
+      if (speechWords < MIN_SPEECH_WORDS) unmet.push(`at least ${MIN_SPEECH_WORDS} words (captured ${speechWords})`);
+      if (speechSeconds < MIN_SPEECH_SECONDS) unmet.push(`at least ${MIN_SPEECH_SECONDS}s of voice (captured ${Math.round(speechSeconds)}s)`);
+      if (elapsed < MIN_SESSION_SECONDS) unmet.push(`a ${MIN_SESSION_SECONDS}s session (lasted ${formatTime(elapsed)})`);
+      const hasEvidence = unmet.length === 0;
+      const issueCount = reviewMarkersRef.current.filter((marker) => marker.kind === 'issue').length;
+      const componentScores = [
+        cameraEnabled ? 1 : 0,
+        micEnabled ? 1 : 0,
+        Math.min(1, speechWords / MIN_SPEECH_WORDS),
+        Math.min(1, speechSeconds / MIN_SPEECH_SECONDS),
+        Math.min(1, elapsed / MIN_SESSION_SECONDS),
+      ];
+      const baseScore = Math.round((componentScores.reduce((total, value) => total + value, 0) / componentScores.length) * 100);
+      const hesitationsPerMinute = issueCount / (sessionSeconds / 60);
+      const hesitationDeduction = Math.min(20, Math.round(hesitationsPerMinute * 6));
       const evidenceScore = hasEvidence
-        ? Math.min(100, Math.round(50 + Math.min(25, speechWords / 4) + Math.min(15, speechSeconds * 2) + (cameraEnabled ? 10 : 0)))
+        ? Math.max(0, Math.min(100, baseScore - hesitationDeduction))
         : null;
+      setScoreBreakdown({
+        base: baseScore,
+        issueDeduction: hesitationDeduction,
+        final: evidenceScore ?? 0,
+        reason: hesitationDeduction
+          ? `${issueCount} hesitation${issueCount === 1 ? '' : 's'} detected — about ${hesitationsPerMinute.toFixed(1)} per minute of speech`
+          : 'No repeated words, filler events, or extended pauses detected in your speech',
+        unmet,
+        wordRate: Math.round((speechWords / Math.max(1, speechSeconds)) * 60),
+        scored: hasEvidence,
+      });
       setScore(evidenceScore);
+      setDelivery({ status: 'loading' });
+      void requestDeliveryRead(transcriptRef.current, speechSeconds).then(setDelivery);
+      const monitor = monitorRef.current;
+      monitor?.stop();
+      setVoiceSummary(monitor?.getSummary() ?? null);
+      setMonitorSnapshot(monitor?.snapshot() ?? null);
+      setLiveAlert(null);
       const newItem: HistoryItem = {
         id: `session-${Date.now()}`,
         title: 'Focused communication practice',
         date: 'Just now',
         duration: formatTime(elapsed),
-        score: evidenceScore ?? 0,
-        label: evidenceScore === null ? 'Needs more evidence' : 'Signal sample',
+        score: evidenceScore,
+        label: evidenceScore === null ? 'Below threshold' : evidenceScore >= 80 ? 'Strong sample' : 'Scored',
       };
       setHistory((items) => [newItem, ...items].slice(0, 4));
       setNotice(hasEvidence
-        ? 'Session complete. This score reflects signal coverage, not a judgment of your communication.'
-        : 'Session complete, but there was not enough evidence to score it. Silence never earns a default score.');
+        ? `Session complete — scored ${evidenceScore}/100 from ${speechWords} words, ${Math.round(speechSeconds)}s of voice, and ${formatTime(elapsed)} of session time.`
+        : `No score this round — missing ${joinList(unmet)}. Speak for most of the session and the score will appear.`);
       return;
     }
     if (!cameraEnabled || !micEnabled) {
@@ -527,6 +649,8 @@ function Home() {
     setCompleted(false);
     setElapsed(0);
     setScore(null);
+    setScoreBreakdown(null);
+    setDelivery(null);
     setSpeechWords(0);
     setSpeechSeconds(0);
     setTranscript('');
@@ -536,13 +660,23 @@ function Home() {
     setRecordingDuration(0);
     silenceStartedRef.current = null;
     lastPauseMarkerRef.current = -10;
+    prevFrameAtRef.current = 0;
     setFrequencyData(Array.from({ length: 24 }, () => 0));
     setPaused(false);
+    const monitor = new RealtimeVoiceMonitor();
+    monitor.start();
+    monitorRef.current = monitor;
+    monitorSnapshotAtRef.current = 0;
+    monitorAudioClockRef.current = -1;
+    setMonitorSnapshot(monitor.snapshot());
+    setVoiceSummary(null);
+    setVoiceAlerts([]);
+    setLiveAlert(null);
     setActive(true);
     activeRef.current = true;
     startSpeechCapture();
     startRecording();
-    setNotice('Session is live. The coach is checking camera presence, microphone activity, and speech — not guessing from silence.');
+    setNotice(`Session is live. Fill the readiness dial — ${MIN_SPEECH_WORDS}+ words, ${MIN_SPEECH_SECONDS}s+ of voice, ${MIN_SESSION_SECONDS}s+ of session — then finish for your score.`);
   };
 
   const handleNav = (label: string) => {
@@ -558,10 +692,17 @@ function Home() {
     setCompleted(false);
     setElapsed(0);
     setScore(null);
+    setDelivery(null);
     setSpeechWords(0);
     setSpeechSeconds(0);
     setTranscript('');
     setFaceBox(null);
+    monitorRef.current?.reset();
+    monitorRef.current = null;
+    setMonitorSnapshot(null);
+    setVoiceSummary(null);
+    setVoiceAlerts([]);
+    setLiveAlert(null);
     setNotice('Assessment restarted. The score will stay empty until real signals are captured.');
   };
 
@@ -576,36 +717,6 @@ function Home() {
     else window.localStorage.removeItem('fusion-coach.identity');
     setAuthStep('signed-in');
     setNameDraft('');
-  };
-
-  const beginFaceId = async () => {
-    setAuthStep('face-id');
-    setFaceScanState('scanning');
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setFaceScanState('error');
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-      streamRef.current = stream;
-      setCameraEnabled(true);
-      const startedAt = Date.now();
-      const waitForFace = () => {
-        if (faceRecognitionStatusRef.current === 'detected') {
-          setFaceScanState('complete');
-          finishSignIn('Returning speaker');
-          return;
-        }
-        if (Date.now() - startedAt > 12000) {
-          setFaceScanState('error');
-          return;
-        }
-        window.setTimeout(waitForFace, 250);
-      };
-      window.setTimeout(waitForFace, 500);
-    } catch {
-      setFaceScanState('error');
-    }
   };
 
   const signOut = () => {
@@ -661,6 +772,18 @@ function Home() {
     return () => window.removeEventListener('keydown', onKeyDown);
   });
 
+  const readiness = {
+    camera: cameraEnabled,
+    mic: micEnabled && audioLevel > MIC_ACTIVE_THRESHOLD,
+    words: Math.min(1, speechWords / MIN_SPEECH_WORDS),
+    voice: Math.min(1, speechSeconds / MIN_SPEECH_SECONDS),
+    duration: Math.min(1, elapsed / MIN_SESSION_SECONDS),
+  };
+  const readinessPct = Math.round(((readiness.words + readiness.voice + readiness.duration + (readiness.camera ? 1 : 0) + (readiness.mic ? 1 : 0)) / 5) * 100);
+  const ringValue = active ? readinessPct : score;
+  const ringStyle = active || score !== null
+    ? ({ background: `conic-gradient(#c3df39 0deg ${(ringValue ?? 0) * 3.6}deg, #ece7dd ${(ringValue ?? 0) * 3.6}deg 360deg)` } as CSSProperties)
+    : undefined;
   const activeStageIndex = active || completed ? 5 : 1;
   const statusLabel = active ? 'Live session' : completed ? 'Session complete' : 'Ready for practice';
   const speechSupported = Boolean((window as typeof window & { SpeechRecognition?: unknown; webkitSpeechRecognition?: unknown }).SpeechRecognition
@@ -671,10 +794,7 @@ function Home() {
       <AuthGate
         step={authStep}
         name={nameDraft}
-        faceScanState={faceScanState}
-        faceIdVideoRef={faceIdVideoRef}
         onNameChange={setNameDraft}
-        onFaceId={() => void beginFaceId()}
         onNewAccount={() => setAuthStep('new-account')}
         onGuest={() => setAuthStep('guest')}
         onSubmitName={() => finishSignIn(nameDraft || (authStep === 'guest' ? 'Guest' : ''), authStep !== 'guest')}
@@ -702,6 +822,9 @@ function Home() {
             <button className={`fc-nav-item ${activeNav === 'Progress' ? 'active' : ''}`} onClick={() => handleNav('Progress')} data-testid="nav-progress">
               <BarChart3 /> <span>Progress</span>
             </button>
+            <button className={`fc-nav-item ${activeNav === 'Voice lab' ? 'active' : ''}`} onClick={() => handleNav('Voice lab')} data-testid="nav-voice-lab">
+              <Mic /> <span>Voice lab</span>
+            </button>
           </nav>
           <div className="fc-sidebar-bottom">
             <div className="fc-coach-note">
@@ -727,7 +850,7 @@ function Home() {
         <main className="fc-main">
           <header className="fc-header">
             <div>
-              <div className="fc-eyebrow">Thursday · 14 March 2024</div>
+              <div className="fc-eyebrow">{formatToday()}</div>
               <h2 className="fc-greeting" data-testid="text-greeting">Good morning, {identityName}</h2>
             </div>
             <div className="fc-header-actions">
@@ -739,7 +862,8 @@ function Home() {
           </header>
 
           <div className="fc-main-inner">
-            {activeNav !== 'Practice room' && (
+            {activeNav === 'Voice lab' && <VoiceLab />}
+            {activeNav !== 'Practice room' && activeNav !== 'Voice lab' && (
               <WorkspaceView
                 activeNav={activeNav}
                 history={history}
@@ -751,7 +875,6 @@ function Home() {
                 }}
                 onSignOut={signOut}
                 onOpenShortcuts={() => setShortcutsOpen(true)}
-                onStartFaceId={() => void beginFaceId()}
               />
             )}
             {activeNav === 'Practice room' && (<>
@@ -843,19 +966,38 @@ function Home() {
               <section className="fc-card fc-score-card" aria-labelledby="score-title">
                 <div className="fc-card-head"><div><h3 className="fc-card-title" id="score-title">Live score</h3><span className="fc-card-meta">Fusion readout</span></div><button className="fc-icon-button" onClick={() => handleNav('Progress')} aria-label="View progress"><ArrowUpRight size={17} /></button></div>
                 <div className="fc-score-body">
-                  <div className={`fc-score-ring ${score === null ? 'empty' : ''}`} data-testid="score-ring"><div className="fc-score-number"><strong data-testid="text-live-score">{score ?? '—'}</strong><span>{score === null ? 'waiting for evidence' : 'signal coverage'}</span></div></div>
+                  <div className={`fc-score-ring ${active || score !== null ? '' : 'empty'}`} style={ringStyle} data-testid="score-ring"><div className="fc-score-number"><strong data-testid="text-live-score">{active ? `${readinessPct}%` : score ?? '—'}</strong><span>{active ? 'session readiness' : score !== null ? 'final score' : 'not scored'}</span></div></div>
                   <div className="fc-score-copy">
-                    <h3>{active ? (speechWords > 0 ? 'Evidence is accumulating.' : 'Waiting for your voice.') : completed ? (score === null ? 'Not enough evidence.' : 'Evidence-based round.') : 'No score yet.'}</h3>
-                    <p>{active ? 'The session is checking camera presence, microphone activity, speech words, and duration.' : 'A score only appears after real input is captured. Silence never earns a default score.'}</p>
-                    <div className="fc-score-trend"><Info /> {speechWords} words · {Math.round(speechSeconds)}s voice activity</div>
+                    <h3>{active ? (readinessPct >= 100 ? 'All requirements met — finish for your score.' : 'Evidence is accumulating.') : completed ? (score !== null ? 'Evidence-based round.' : 'Not enough evidence this round.') : 'No score yet.'}</h3>
+                    <p>{active
+                      ? `The engine is listening. Reach ${MIN_SPEECH_WORDS}+ words, ${MIN_SPEECH_SECONDS}s+ of voice, and ${MIN_SESSION_SECONDS}s+ of session to earn a score.`
+                      : `A score appears only after ${MIN_SPEECH_WORDS}+ words, ${MIN_SPEECH_SECONDS}s+ of voice, and ${MIN_SESSION_SECONDS}s+ of session. Silence never earns a score.`}</p>
+                    <div className="fc-score-trend"><Info /> {speechWords}/{MIN_SPEECH_WORDS} words · {Math.round(speechSeconds)}/{MIN_SPEECH_SECONDS}s voice · {formatTime(elapsed)} elapsed</div>
                   </div>
                 </div>
                 <div className="fc-divider" />
-                <div className="fc-score-list">
-                  <ScoreLine label="Camera signal" value={cameraEnabled ? 100 : 0} />
-                  <ScoreLine label="Mic activity" value={micEnabled ? Math.min(100, Math.round(audioLevel * 1200)) : 0} />
-                  <ScoreLine label="Speech sample" value={Math.min(100, speechWords * 4)} />
+                <div className="fc-requirements" data-testid="requirements-list">
+                  {[
+                    { id: 'camera', ok: cameraEnabled, text: 'Camera connected' },
+                    { id: 'mic', ok: readiness.mic, text: readiness.mic ? 'Hearing you clearly' : micEnabled ? 'Mic connected — waiting for your voice' : 'Microphone connected' },
+                    { id: 'words', ok: speechWords >= MIN_SPEECH_WORDS, text: `${MIN_SPEECH_WORDS}+ words spoken (${speechWords} so far)` },
+                    { id: 'voice', ok: speechSeconds >= MIN_SPEECH_SECONDS, text: `${MIN_SPEECH_SECONDS}s+ of voice activity (${Math.round(speechSeconds)}s so far)` },
+                    { id: 'length', ok: elapsed >= MIN_SESSION_SECONDS, text: `${MIN_SESSION_SECONDS}s+ session length (${formatTime(elapsed)} so far)` },
+                  ].map((req) => (
+                    <div className={`fc-requirement ${req.ok ? 'met' : ''}`} key={req.id}>
+                      {req.ok ? <CheckCircle2 size={13} /> : <Target size={13} />}
+                      <span>{req.text}</span>
+                    </div>
+                  ))}
                 </div>
+                <VoiceControlPanel
+                  snapshot={monitorSnapshot}
+                  summary={voiceSummary}
+                  alerts={voiceAlerts}
+                  liveAlert={liveAlert}
+                  active={active}
+                />
+                <DeliveryReadout delivery={delivery} />
               </section>
             </div>
 
@@ -863,9 +1005,9 @@ function Home() {
               <section className="fc-card fc-feedback" aria-labelledby="feedback-title">
                 <div className="fc-card-head"><div><h3 className="fc-card-title" id="feedback-title">Coach’s read</h3><span className="fc-card-meta">Specific, not noisy</span></div><Headphones size={17} color="#9ba0a7" /></div>
                 <div className="fc-feedback-list">
-                  <Feedback icon={<Camera size={14} />} title={cameraEnabled ? 'Camera signal connected' : 'It’s quiet right now'} text={cameraEnabled ? 'The camera is connected. Face recognition is not active in this build, so the app will not pretend a face was detected.' : 'No camera signal is connected. Turn on the camera before asking for a presence evaluation.'} />
-                  <Feedback icon={<AudioLines size={14} />} title={micEnabled && audioLevel > 0.045 ? 'Voice activity detected' : 'No speech captured yet'} text={speechSupported ? 'The browser speech engine counts final words. Speak a complete thought so the score has evidence to use.' : 'This browser does not expose speech-to-text. The microphone can still show activity, but no word-level evaluation is available.'} />
-                  <Feedback icon={<Info size={14} />} title="How the evaluation works" text="Fusion Coach currently measures device signal, voice activity, speech words, and session duration. It does not infer quality from an empty room." />
+                  <Feedback icon={<Camera size={14} />} title={cameraEnabled ? 'Camera signal connected' : 'It’s quiet right now'} text={cameraEnabled ? 'The camera is connected. Face, body, and hand landmarks are drawn only when the live models return them.' : 'No camera signal is connected. Turn on the camera before asking for a presence evaluation.'} />
+                  <Feedback icon={<AudioLines size={14} />} title={micEnabled && audioLevel > MIC_ACTIVE_THRESHOLD ? 'Voice activity detected' : 'No speech captured yet'} text={speechSupported ? 'The browser speech engine counts final words. Speak a complete thought so the score has evidence to use.' : 'This browser does not expose speech-to-text. The microphone can still show activity, but no word-level evaluation is available.'} />
+                  <Feedback icon={<Info size={14} />} title="How the evaluation works" text={`A session is scored once it captures ${MIN_SPEECH_WORDS}+ words, ${MIN_SPEECH_SECONDS}+ seconds of voice, and ${MIN_SESSION_SECONDS}+ seconds of session time. Short or silent rounds stay unscored — they never default to a passing number.`} />
                 </div>
                 <div className="fc-focus"><span>Next round focus</span><b>{score === null ? 'Collect a real voice sample' : 'Review the evidence before repeating'}</b><ChevronRight size={15} color="#c3df39" /></div>
               </section>
@@ -877,6 +1019,15 @@ function Home() {
                 </div>
               </section>
             </div>
+             <ReviewPanel
+               recordingUrl={recordingUrl}
+               recordingDuration={recordingDuration}
+               markers={reviewMarkers}
+               score={score}
+               breakdown={scoreBreakdown}
+               voiceSummary={voiceSummary}
+               voiceAlerts={voiceAlerts}
+             />
             </>)}
           </div>
         </main>
@@ -893,10 +1044,9 @@ type WorkspaceViewProps = {
   onNameChange: (name: string) => void;
   onSignOut: () => void;
   onOpenShortcuts: () => void;
-  onStartFaceId: () => void;
 };
 
-function WorkspaceView({ activeNav, history, identityName, onNameChange, onSignOut, onOpenShortcuts, onStartFaceId }: WorkspaceViewProps) {
+function WorkspaceView({ activeNav, history, identityName, onNameChange, onSignOut, onOpenShortcuts }: WorkspaceViewProps) {
   const [draftName, setDraftName] = useState(identityName);
   const scoredItems = history.filter((item) => item.score !== null);
   const average = scoredItems.length ? Math.round(scoredItems.reduce((total, item) => total + (item.score ?? 0), 0) / scoredItems.length) : 0;
@@ -915,11 +1065,6 @@ function WorkspaceView({ activeNav, history, identityName, onNameChange, onSignO
             <label className="fc-field-label" htmlFor="identity-name">Name</label>
             <input id="identity-name" className="fc-field" value={draftName} onChange={(event) => setDraftName(event.target.value)} />
             <button className="fc-primary-button" onClick={() => onNameChange(draftName.trim() || identityName)}>Save name</button>
-          </div>
-          <div className="fc-card fc-settings-card">
-            <div className="fc-card-head"><div><h3 className="fc-card-title">Face ID sign-in</h3><span className="fc-card-meta">Camera presence scan</span></div><ScanFace size={17} color="#9ba0a7" /></div>
-            <p className="fc-settings-copy">Face ID is set up as a presence scan here. It confirms a person is in front of the camera, but does not claim to identify or store a face without a recognition service.</p>
-            <button className="fc-secondary-button" onClick={onStartFaceId}><ScanFace size={14} /> Run presence scan</button>
           </div>
           <div className="fc-card fc-settings-card">
             <div className="fc-card-head"><div><h3 className="fc-card-title">Keyboard shortcuts</h3><span className="fc-card-meta">Move without reaching for the mouse</span></div><Keyboard size={17} color="#9ba0a7" /></div>
@@ -952,8 +1097,8 @@ function WorkspaceView({ activeNav, history, identityName, onNameChange, onSignO
           <div className="fc-method-grid">
             <div><b>01 / Camera presence</b><span>Camera must be connected. Face recognition is not claimed without a model.</span></div>
             <div><b>02 / Voice activity</b><span>Microphone energy is sampled while you speak.</span></div>
-            <div><b>03 / Speech sample</b><span>Final words from the browser speech engine are counted.</span></div>
-            <div><b>04 / Session duration</b><span>A score requires a real sample, not an empty room.</span></div>
+            <div><b>03 / Speech sample</b><span>At least {MIN_SPEECH_WORDS} final words from the browser speech engine.</span></div>
+            <div><b>04 / Session duration</b><span>A score requires {MIN_SESSION_SECONDS}s+ of session and {MIN_SPEECH_SECONDS}s+ of voice — silence never scores.</span></div>
           </div>
         </div>
       </section>
@@ -974,13 +1119,10 @@ function WorkspaceView({ activeNav, history, identityName, onNameChange, onSignO
   );
 }
 
-function AuthGate({ step, name, faceScanState, faceIdVideoRef, onNameChange, onFaceId, onNewAccount, onGuest, onSubmitName, onBack }: {
+function AuthGate({ step, name, onNameChange, onNewAccount, onGuest, onSubmitName, onBack }: {
   step: AuthStep;
   name: string;
-  faceScanState: FaceScanState;
-  faceIdVideoRef: RefObject<HTMLVideoElement>;
   onNameChange: (name: string) => void;
-  onFaceId: () => void;
   onNewAccount: () => void;
   onGuest: () => void;
   onSubmitName: () => void;
@@ -989,26 +1131,16 @@ function AuthGate({ step, name, faceScanState, faceIdVideoRef, onNameChange, onF
   const isNameStep = step === 'new-account' || step === 'guest';
   return (
     <div className="fc-auth">
-      <video ref={faceIdVideoRef} className="fc-sensor-video" autoPlay muted playsInline aria-hidden="true" />
       <div className="fc-auth-card">
         <div className="fc-brand"><div className="fc-brand-mark">F</div><div className="fc-brand-name">fusion<span>.</span></div></div>
         {step === 'chooser' && <>
           <div className="fc-auth-kicker">A private practice room</div>
           <h1>Who is practicing today?</h1>
-          <p className="fc-auth-copy">Use a presence scan for an existing account, create a new practice identity, or evaluate as a guest.</p>
+          <p className="fc-auth-copy">Create a new practice identity, or evaluate as a guest without saving anything.</p>
           <div className="fc-auth-options">
-            <button className="fc-auth-option" onClick={onFaceId}><span className="fc-auth-icon"><ScanFace size={19} /></span><span><b>Continue with Face ID</b><small>Camera presence scan for an existing account</small></span><ChevronRight size={16} /></button>
             <button className="fc-auth-option" onClick={onNewAccount}><span className="fc-auth-icon"><UserPlus size={19} /></span><span><b>Create a new account</b><small>Choose a name for your practice space</small></span><ChevronRight size={16} /></button>
             <button className="fc-auth-option" onClick={onGuest}><span className="fc-auth-icon"><Users size={19} /></span><span><b>Guest evaluation</b><small>Try the room without saving an account</small></span><ChevronRight size={16} /></button>
           </div>
-        </>}
-        {step === 'face-id' && <>
-          <div className="fc-auth-kicker">Existing account / Face ID</div>
-          <h1>{faceScanState === 'error' ? 'Camera access is needed.' : faceScanState === 'complete' ? 'Presence confirmed.' : 'Look toward the camera.'}</h1>
-          <p className="fc-auth-copy">{faceScanState === 'error' ? 'Allow camera access and try again. This scan does not store a biometric template.' : 'This first pass confirms someone is present. A real identity match needs a connected recognition provider.'}</p>
-          <div className={`fc-face-scan ${faceScanState}`}><ScanFace size={64} /><span>{faceScanState === 'scanning' ? 'Scanning presence…' : faceScanState === 'complete' ? 'Scan complete' : 'Scan paused'}</span></div>
-          {faceScanState === 'error' && <button className="fc-primary-button" onClick={onFaceId}>Try camera again</button>}
-          <button className="fc-text-button" onClick={onBack}>Back</button>
         </>}
         {isNameStep && <>
           <div className="fc-auth-kicker">{step === 'guest' ? 'Guest evaluation' : 'New practice identity'}</div>
@@ -1207,6 +1339,275 @@ function LandmarkOverlay({ faceBox, faceKeypoints, poseLandmarks, handLandmarks 
   );
 }
 
+function scoreTone(value: number) {
+  if (value >= 85) return 'good';
+  if (value >= 60) return 'watch';
+  return 'low';
+}
+
+/**
+ * Live readout of the realtime voice monitor: calibration progress, the three
+ * baseline-relative monitors, and the most recent drift alert.
+ */
+function VoiceControlPanel({ snapshot, summary, alerts, liveAlert, active }: {
+  snapshot: MonitorSnapshot | null;
+  summary: VoiceSummary | null;
+  alerts: VoiceAlert[];
+  liveAlert: VoiceAlert | null;
+  active: boolean;
+}) {
+  const phase = snapshot?.phase ?? 'idle';
+  const calibrating = phase === 'calibrating';
+  const calibrated = phase === 'monitoring' || phase === 'stopped';
+  const read = summary ?? snapshot?.summary ?? null;
+  const hasSpeech = (read?.speechBlocks ?? 0) > 0;
+  const calibrationProgress = snapshot
+    ? Math.min(100, (snapshot.calibrationElapsed / MONITOR_CONFIG.calibrationSeconds) * 100)
+    : 0;
+  const monitors = [
+    {
+      key: 'pitch',
+      label: 'Pitch control',
+      score: read?.pitchScore ?? 0,
+      measured: Boolean(read?.measured.pitch),
+      detail: read?.measured.pitch
+        ? `${Math.round(read.pitchViolationRatio * 100)}% of speech blocks outside your range`
+        : 'No voiced pitch measured yet',
+    },
+    {
+      key: 'energy',
+      label: 'Volume control',
+      score: read?.energyScore ?? 0,
+      measured: Boolean(read?.measured.energy),
+      detail: read?.measured.energy
+        ? `${Math.round(read.energyViolationRatio * 100)}% of speech blocks outside your level`
+        : 'No stable level measured yet',
+    },
+    {
+      key: 'pause',
+      label: 'Pause control',
+      score: read?.pauseScore ?? 0,
+      measured: Boolean(read?.measured.pause) && hasSpeech,
+      detail: read?.measured.pause && hasSpeech
+        ? `${read.pauseExcessRatio.toFixed(2)}s over the pause threshold per second`
+        : 'No pauses measured yet',
+    },
+  ];
+
+  return (
+    <div className={`fc-voice ${active ? 'live' : ''}`} data-testid="voice-control-panel">
+      <div className="fc-voice-head">
+        <b>Voice control</b>
+        <span>{calibrating ? 'Calibrating' : calibrated ? 'Own-baseline monitor' : 'Realtime monitor'}</span>
+      </div>
+
+      {calibrating && (
+        <div className="fc-voice-calibration" data-testid="voice-calibration">
+          <div className="fc-voice-progress"><i style={{ width: `${calibrationProgress}%` }} /></div>
+          <div className="fc-voice-progress-meta">
+            <span>Recording your baseline — speak naturally</span>
+            <b>{(snapshot?.calibrationElapsed ?? 0).toFixed(1)} / {MONITOR_CONFIG.calibrationSeconds.toFixed(1)}s</b>
+          </div>
+        </div>
+      )}
+
+      {calibrated && (
+        <>
+          <div className="fc-voice-monitors">
+            {monitors.map((monitor) => (
+              <div className="fc-voice-monitor" key={monitor.key}>
+                <div className="fc-voice-monitor-top">
+                  <span>{monitor.label}</span>
+                  <b className={monitor.measured ? scoreTone(monitor.score) : 'empty'}>
+                    {monitor.measured ? Math.round(monitor.score) : '—'}
+                  </b>
+                </div>
+                <div className="fc-voice-bar">
+                  <i className={monitor.measured ? scoreTone(monitor.score) : ''} style={{ width: `${monitor.measured ? monitor.score : 0}%` }} />
+                </div>
+                <small>{monitor.detail}</small>
+              </div>
+            ))}
+          </div>
+          <div className="fc-voice-baseline">
+            {snapshot && snapshot.baseline.pitchMean !== null && snapshot.baseline.energyMean !== null ? (
+              <>
+                Baseline pitch {snapshot.baseline.pitchMean.toFixed(1)} st (±{snapshot.baseline.pitchDeviation?.toFixed(2)}) · level{' '}
+                {snapshot.baseline.energyMean.toFixed(1)} dB (±{snapshot.baseline.energyDeviation?.toFixed(2)}) · pause threshold{' '}
+                {snapshot.baseline.pauseThreshold.toFixed(1)}s
+              </>
+            ) : (
+              <>
+                Baseline recorded but too short to model — thresholds fall back to the defaults (|z| {MONITOR_CONFIG.zHigh}, {MONITOR_CONFIG.fallbackPauseThreshold.toFixed(1)}s pause).
+              </>
+            )}
+          </div>
+          {hasSpeech && (
+            <div className="fc-voice-overall">
+              <span>Overall voice control</span>
+              <strong>{Math.round(read?.overallScore ?? 0)}</strong>
+              <small>mean of the measured monitors</small>
+            </div>
+          )}
+        </>
+      )}
+
+      {liveAlert && (
+        <div className="fc-voice-alert" role="status" data-testid="voice-alert">
+          <Waves size={14} />
+          <span><b>{formatTime(Math.round(liveAlert.at))}</b> {liveAlert.message}</span>
+        </div>
+      )}
+
+      {phase === 'idle' && (
+        <p className="fc-voice-note">
+          Each session opens with {MONITOR_CONFIG.calibrationSeconds}s of baseline recording. After that every{' '}
+          {MONITOR_CONFIG.blockSeconds}s block is compared with your own pitch and volume, and pauses longer than the
+          threshold are counted. Alerts repeat at most once every {MONITOR_CONFIG.alertCooldownSeconds}s.
+        </p>
+      )}
+
+      {calibrated && (
+        <p className="fc-voice-note">
+          {alerts.length
+            ? `${alerts.length} drift alert${alerts.length === 1 ? '' : 's'} so far — these describe distance from your own baseline, not a judgement of how you sound.`
+            : 'No drift alerts yet — your pitch, volume, and pauses stay close to your baseline.'}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function ReviewPanel({ recordingUrl, recordingDuration, markers, score, breakdown, voiceSummary, voiceAlerts }: {
+  recordingUrl: string | null;
+  recordingDuration: number;
+  markers: ReviewMarker[];
+  score: number | null;
+  breakdown: ScoreBreakdown | null;
+  voiceSummary: VoiceSummary | null;
+  voiceAlerts: VoiceAlert[];
+}) {
+  const duration = Math.max(1, recordingDuration);
+  return (
+    <section className="fc-card fc-review" aria-labelledby="review-title">
+      <div className="fc-card-head">
+        <div><h3 className="fc-card-title" id="review-title">Last test review</h3><span className="fc-card-meta">Playback with evidence markers</span></div>
+        <span className={`fc-review-score ${score === null ? 'empty' : ''}`}>{score ?? '—'}<small>{score === null ? 'not scored' : 'score'}</small></span>
+      </div>
+      {recordingUrl ? (
+        <video className="fc-review-player" src={recordingUrl} controls playsInline preload="metadata" aria-label="Last practice recording" />
+      ) : (
+        <div className="fc-review-empty"><VideoOff size={18} /><span>Finish a camera-and-microphone session to save its last recording here.</span></div>
+      )}
+      <div className="fc-review-timeline" style={{ '--review-duration': `${duration}s` } as CSSProperties}>
+        <div className="fc-review-track" />
+        {markers.map((marker, index) => (
+          <div className={`fc-review-marker ${marker.kind}`} style={{ left: `${Math.min(100, (marker.time / duration) * 100)}%` }} key={`${marker.label}-${marker.time}-${index}`}>
+            <i />
+            <span>{formatTime(Math.round(marker.time))} · {marker.label}</span>
+          </div>
+        ))}
+      </div>
+      <div className="fc-review-legend"><span><i className="good" /> Captured clearly</span><span><i className="issue" /> Pause, filler, or repeated word</span></div>
+      {breakdown?.scored ? (
+        <div className="fc-review-explanation">
+          <b>Why this score: {breakdown.final}/100</b>
+          <span>Evidence coverage {breakdown.base}/100 − hesitation deduction {breakdown.issueDeduction} · {breakdown.wordRate} words/min.</span>
+          <p>{breakdown.reason}. Select a marker above to match the timestamp in the recording.</p>
+        </div>
+      ) : breakdown ? (
+        <div className="fc-review-explanation no-score">
+          <b>No score this round</b>
+          <span>Missing: {joinList(breakdown.unmet)}.</span>
+          <p>Short or silent sessions never earn a default score. Fill the readiness dial — speak for most of the session — and this panel will show the full math.</p>
+        </div>
+      ) : (
+        <div className="fc-review-explanation"><b>No score yet</b><span>Finish a session to see how it was scored.</span></div>
+      )}
+      <div className="fc-review-events">
+        {markers.length ? markers.map((marker, index) => <div className={`fc-review-event ${marker.kind}`} key={`${marker.label}-event-${index}`}><b>{formatTime(Math.round(marker.time))}</b><span>{marker.label}</span></div>) : <span className="fc-review-no-events">No faults detected yet. Speak naturally, then finish the session to review it.</span>}
+      </div>
+      {voiceSummary && (
+        <div className="fc-voice-result" data-testid="voice-result">
+          <div className="fc-voice-head"><b>Voice control read</b><span>Own-baseline monitor</span></div>
+          {voiceSummary.speechBlocks > 0 ? (
+            <>
+              <div className="fc-voice-result-grid">
+                {([
+                  ['Pitch', voiceSummary.pitchScore, voiceSummary.measured.pitch, voiceSummary.pitchViolationRatio],
+                  ['Volume', voiceSummary.energyScore, voiceSummary.measured.energy, voiceSummary.energyViolationRatio],
+                  ['Pause', voiceSummary.pauseScore, voiceSummary.measured.pause, voiceSummary.pauseExcessRatio],
+                ] as const).map(([label, value, measured, ratio]) => (
+                  <div key={label}>
+                    <span>{label}</span>
+                    <b className={measured ? scoreTone(value) : 'empty'}>{measured ? Math.round(value) : '—'}</b>
+                    <i className={measured ? scoreTone(value) : ''} style={{ width: `${measured ? value : 0}%` }} />
+                    <small>{measured ? `${(ratio * 100).toFixed(0)}% outside baseline` : 'not measured'}</small>
+                  </div>
+                ))}
+              </div>
+              <p className="fc-voice-note">
+                {voiceSummary.speechBlocks} scored blocks over {Math.round(voiceSummary.evaluationSeconds)}s of evaluation · overall{' '}
+                {Math.round(voiceSummary.overallScore)}/100 measured against your own baseline in the first{' '}
+                {MONITOR_CONFIG.calibrationSeconds}s of this session.
+              </p>
+            </>
+          ) : voiceSummary.evaluationSeconds === 0 ? (
+            <p className="fc-voice-note">
+              The session ended before the {MONITOR_CONFIG.calibrationSeconds}s baseline was complete, so the monitor never
+              reached its evaluation phase. Nothing is filled in from a partial baseline.
+            </p>
+          ) : (
+            <p className="fc-voice-note">
+              No speech blocks reached the monitor, so pitch, volume, and pause control are unmeasured for this round.
+              They stay empty instead of defaulting to a score.
+            </p>
+          )}
+          {voiceAlerts.length > 0 && (
+            <div className="fc-review-events fc-voice-alert-list">
+              {voiceAlerts.map((alert, index) => (
+                <div className="fc-review-event issue" key={`${alert.kind}-${alert.at}-${index}`}>
+                  <b>{formatTime(Math.round(alert.at))}</b><span>{alert.message}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function DeliveryReadout({ delivery }: { delivery: DeliveryRead | null }) {
+  return (
+    <div className="fc-delivery" data-testid="delivery-read">
+      <div className="fc-delivery-head"><b>Transcript read</b><span>API server</span></div>
+      {delivery === null && <p className="fc-delivery-note quiet">Finish a session and the captured transcript is scored for pace, fillers, vocabulary, grammar, and structure.</p>}
+      {delivery?.status === 'loading' && <p className="fc-delivery-note quiet">Sending the transcript for analysis…</p>}
+      {delivery?.status === 'unavailable' && <p className="fc-delivery-note quiet">{delivery.message}</p>}
+      {delivery?.status === 'ready' && (
+        <>
+          <div className="fc-delivery-metrics">
+            <span><b>{delivery.analysis.metrics.wpm}</b> wpm</span>
+            <span><b>{delivery.analysis.metrics.fillers}</b> fillers</span>
+            <span><b>{delivery.analysis.metrics.word_count}</b> words</span>
+          </div>
+          <div className="fc-delivery-scores">
+            {(['fluency', 'vocabulary', 'grammar', 'structure'] as const).map((key) => (
+              <div key={key}>
+                <span>{key}</span>
+                <b>{delivery.analysis.scores[key]}/10</b>
+                <i style={{ width: `${delivery.analysis.scores[key] * 10}%` }} />
+              </div>
+            ))}
+          </div>
+          <p className="fc-delivery-note">{delivery.analysis.feedback[delivery.analysis.feedback.length - 1]}</p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function SignalRow({ label, value, detail, tone }: { label: string; value: string; detail: string; tone: 'good' | 'quiet' }) {
   return <div className="fc-signal-row"><div className={`fc-signal-status ${tone}`} /><div className="fc-signal-copy"><b>{label}</b><span>{detail}</span></div><strong>{value}</strong></div>;
 }
@@ -1236,8 +1637,10 @@ function ShortcutPanel({ onClose }: { onClose: () => void }) {
   );
 }
 
-function ScoreLine({ label, value }: { label: string; value: number }) {
-  return <div className="fc-score-line" data-testid={`metric-${label.toLowerCase().replace(' ', '-')}`}><label>{label}</label><div className="fc-bar"><i style={{ width: `${value}%` }} /></div><b>{value}</b></div>;
+function joinList(items: string[]) {
+  if (items.length === 0) return 'more evidence';
+  if (items.length === 1) return items[0];
+  return `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`;
 }
 
 function Feedback({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
@@ -1246,6 +1649,13 @@ function Feedback({ icon, title, text }: { icon: ReactNode; title: string; text:
 
 function HistoryRow({ item }: { item: HistoryItem }) {
   return <div className="fc-history-item" data-testid={`history-row-${item.id}`}><div><strong>{item.title}</strong><span>{item.date} · {item.duration}</span></div><div className="fc-history-score">{item.score ?? '—'}<small>{item.score === null ? 'no score' : 'score'}</small></div><div className="fc-history-pill">{item.label}</div></div>;
+}
+
+function formatToday() {
+  const now = new Date();
+  const weekday = now.toLocaleDateString('en-GB', { weekday: 'long' });
+  const datePart = now.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+  return `${weekday} · ${datePart}`;
 }
 
 function formatTime(seconds: number) {
@@ -1257,12 +1667,22 @@ function formatTime(seconds: number) {
 function Router() {
   return (
     <RoutedErrorBoundary>
+      <ScrollToTop />
       <Switch>
-        <Route path="/" component={Home} />
+        <Route path="/app" component={Home} />
+        <Route path="/" component={Intro} />
         <Route component={NotFound} />
       </Switch>
     </RoutedErrorBoundary>
   );
+}
+
+function ScrollToTop() {
+  const [location] = useLocation();
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [location]);
+  return null;
 }
 
 function RoutedErrorBoundary({ children }: { children: ReactNode }) {
