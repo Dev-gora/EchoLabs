@@ -4,7 +4,9 @@ Local speech-to-text for the post-recording flow. The Express API server calls
 this service; the browser never talks to it directly.
 
 Python is unavoidable here: faster-whisper (CTranslate2) has no Node binding.
-Everything else in the app stays in the existing TypeScript workspace.
+The acoustic delivery module also uses librosa for pYIN pitch, RMS energy and
+silence intervals. Everything else in the app stays in the existing TypeScript
+workspace.
 
 ## Run
 
@@ -41,8 +43,8 @@ The API server has its own knobs: `ASR_SERVICE_URL` (default
 `POST /transcribe` — raw audio body, `Content-Type: audio/*`,
 `X-Audio-Filename: take.webm`. Returns:
 
-```json
-{ "transcript": "...", "words": [{ "word": "um", "start": 0.4, "end": 0.7 }], "duration_sec": 41.0 }
+```json{"transcript": "...", "words": [{ "word": "um", "start": 0.4, "end": 0.7 }], "duration_sec": 41.0, "acoustics": {"pitch_variation_semitones": 2.1, "voiced_ratio": 0.72, "energy_variation_cv": 0.31, "silence_ratio": 0.14, "silence_intervals": [{"start": 3.2, "end": 4.1}]}}
+
 ```
 
 Errors use `{ "error": "code", "message": "human readable" }` with 400 (format),
@@ -60,6 +62,11 @@ Errors use `{ "error": "code", "message": "human readable" }` with 400 (format),
 - `vad_filter` is off: trimming silence would make pace look faster than it was.
 - Word timings are required. A recording that produces text but no timings is
   rejected, because pauses and articulation rate would otherwise be invented.
+- Acoustic fields are independent and nullable. Pitch variation is the standard
+  deviation of pYIN frequency in semitone coordinates; voiced ratio is a fraction;
+  energy variation is the RMS coefficient of variation; silence ratio and intervals
+  are measured with `librosa.effects.split(top_db=40)`. The duration denominator is
+  the decoded true audio duration, not the last word timestamp.
 
 ## Tests
 

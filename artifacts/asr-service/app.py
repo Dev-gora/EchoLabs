@@ -13,7 +13,7 @@ from starlette.concurrency import run_in_threadpool
 
 from asr import AudioRejected, service_info, transcribe_bytes, validate_upload
 
-app = FastAPI(title="Fusion Coach ASR", version="1.0.0")
+app = FastAPI(title="EchoLabs ASR", version="1.0.0")
 
 
 @app.get("/healthz")
@@ -43,7 +43,7 @@ async def transcribe(request: Request) -> dict:
 
 @app.get("/")
 def root() -> dict:
-    return {"service": "fusion-coach-asr", **service_info()}
+    return {"service": "echo-labs-asr", **service_info()}
 
 
 def main() -> None:

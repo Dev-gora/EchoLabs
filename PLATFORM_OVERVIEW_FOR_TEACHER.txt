@@ -1,0 +1,331 @@
+EchoLabs PLATFORM - COMPREHENSIVE OVERVIEW
+===============================================
+
+PROJECT STRUCTURE
+-----------------
+EchoLabs/ (pnpm monorepo)
+├── artifacts/
+│   ├── api-server/     - Express 5 backend API
+│   ├── asr-service/    - Python faster-whisper ASR service
+│   ├── echo-labs/   - React + Vite frontend
+│   └── mockup-sandbox/ - UI prototyping sandbox
+├── lib/                - Shared libraries (api-zod, api-contract, db, etc.)
+└── scripts/            - Build/dev scripts
+
+
+1. FRONTEND (artifacts/echo-labs) - React + Vite
+--------------------------------------------------------
+Tech Stack:
+- React 19.1.0, TypeScript, Vite 7
+- Wouter for routing, TanStack Query
+- Tailwind CSS v4, Radix UI components
+- MediaPipe Tasks Vision (FaceDetector, PoseLandmarker, HandLandmarker)
+- Clerk for authentication
+- Recharts for data visualization
+
+Key Features:
+- Real-time Practice Room: Camera/mic capture with live feedback
+- Multi-modal analysis: Face tracking, pose detection, hand tracking, voice analysis
+- Speech recognition (Web Speech API) + local recording
+- Real-time voice monitoring (pitch, pace, pauses, fillers)
+- Live nudges and feedback during practice
+- Session review with timeline markers
+- Voice Lab for post-recording analysis
+- Progress tracking and history
+- Dark/light theme support
+- Mobile responsive design
+- Onboarding tutorial
+- Keyboard shortcuts
+- Export reports (TXT/JSON)
+
+Components:
+- App.tsx - Main application with routing and practice room
+- pages/intro.tsx - Landing page
+- components/voice-lab.tsx - Post-recording analysis interface
+- components/onboarding-tutorial.tsx - User onboarding
+- lib/realtime-monitor.ts - Real-time voice metrics
+- lib/body-tracking.ts - MediaPipe integration
+- lib/delivery.ts - API communication
+
+
+2. API SERVER (artifacts/api-server) - Express 5 + TypeScript
+--------------------------------------------------------------
+Tech Stack:
+- Express 5, TypeScript, Node.js
+- Zod for validation (@workspace/api-zod)
+- Pino for logging
+- CORS, rate limiting
+- Drizzle ORM (for DB integration)
+
+API Endpoints:
+
+Health & Status:
+- GET /api/health - Health check
+
+Analysis (POST /api/analyze):
+- POST /api/analyze - Analyze recording (transcript + duration)
+  * Validates transcript and duration
+  * Computes deterministic metrics (WPM, fillers, pauses)
+  * Runs content analysis via LLM
+  * Saves session to store
+  * Returns full analysis with scores
+
+- POST /api/analyze/content - Content-only scoring
+  * Scores grammar, vocabulary, structure, relevance
+  * LLM-based with rubric and anchors
+  * Strips fences, retries once on parse failure, normalizes
+
+- POST /api/analyze/retry - Retry comparison
+  * Compares new attempt with previous session
+  * Computes deltas for metrics and scores
+  * Reuses previous session's prompt_text
+
+- POST /api/analyze/ideal - Generate ideal answer (503 if no LLM configured)
+
+- GET /api/analyze/:id - Retrieve saved analysis by session ID
+
+Speech (POST /api):
+- POST /api/transcribe - Upload audio, get transcript + word timings + acoustics
+  * Forwards to ASR service (http://127.0.0.1:8001)
+  * Validates file type/size
+  * Computes deterministic metrics
+  * Returns words with timestamps
+
+- POST /api/analyze/metrics - Compute metrics from transcript + optional word timings
+- POST /api/analyze/events - Detect speech events (silences, filler bursts, repairs)
+- POST /api/analyze/unified - Unified scoring combining metrics, acoustics, content + feedback
+
+Core Libraries:
+- analysis.ts - Core analysis logic, scoring
+- metrics.ts - WPM, fillers, pauses, lexical diversity (pure functions)
+- content-analysis.ts - LLM content scoring with normalization
+- speech-events.ts - Timestamped speech events detection
+- unified-scoring.ts - Combined scoring across modalities
+- event-feedback.ts - Event-aware feedback generation
+- session-store.ts - In-memory session storage
+- retry-comparison.ts - Attempt comparison logic
+- progress.ts - User progress tracking
+- calibration.ts - Calibration utilities
+
+
+3. ASR SERVICE (artifacts/asr-service) - Python + faster-whisper
+----------------------------------------------------------------
+Tech Stack:
+- FastAPI/Flask style (app.py), Python
+- faster-whisper for local transcription
+- librosa for audio processing/acoustics
+- numpy, soundfile, av
+
+Features:
+- Local faster-whisper transcription with word timestamps
+- Custom initial prompt to preserve disfluencies (um, uh, etc.)
+- Audio validation (format, size, duration 30-180s)
+- True audio duration from decoded samples
+- Temporary file cleanup
+- Acoustic analysis (pitch variation, voiced ratio, energy variation, silence)
+
+API Endpoints (app.py):
+- POST /transcribe - Transcribe audio file
+  * Accepts raw audio body with X-Audio-Filename header
+  * Validates format/size/duration
+  * Returns transcript, words with start/end timestamps, duration, acoustics
+
+Modules:
+- asr.py - Core transcription logic, model loading (singleton with double-checked locking), validation
+- acoustics.py - Acoustic feature extraction
+  * Pitch variation in semitones (via librosa.pyin)
+  * Voiced ratio
+  * Energy variation (RMS coefficient of variation)
+  * Silence detection via librosa.effects.split with top_db threshold
+  * All features return None on failure (no fake defaults)
+
+Configuration (env vars):
+- WHISPER_MODEL (default: base)
+- WHISPER_DEVICE (default: cpu)
+- WHISPER_COMPUTE_TYPE (default: int8)
+- MIN_AUDIO_SEC (default: 30)
+- MAX_AUDIO_SEC (default: 180)
+- MAX_UPLOAD_BYTES (default: 12MB)
+
+
+4. SCORING & METRICS SYSTEM
+---------------------------
+Deterministic Metrics (metrics.ts):
+- WPM (words per minute) over total duration
+- Articulation rate (excluding pauses)
+- Pauses from gaps between consecutive words (count, total, avg, longest)
+- Pause threshold: 0.8s (configurable)
+- Fillers (word-boundary regex): um, uh, er, ah, you know, I mean, sort of, kind of
+- Possible fillers (reported separately): like, so, right, actually, basically, literally
+- Lexical diversity (type-token ratio on fixed window)
+- Average sentence length
+
+Content Scoring (content-analysis.ts - LLM):
+- Scores: grammar, vocabulary, structure, relevance (1-10)
+- Mode-specific context: general, interview, debate
+- Rubric with anchor descriptions per band
+- Grammar mistakes with corrections
+- Strengths, weaknesses, suggestions
+- Temperature 0.2-0.3, JSON output with retries
+- LLM does NOT produce filler counts/confidence/pace (can't hear audio)
+
+Unified Scoring (unified-scoring.ts):
+- Combines fluency (deterministic), delivery (acoustics), content (LLM)
+- Tempo stability, speech-to-pause ratio
+- Fluency gating multiplier
+- Pace scored against 120-160 WPM band
+- All weights/thresholds as named constants
+
+Speech Events (speech-events.ts):
+- silence_event (medium 0.8s, high 1.5s thresholds)
+- filler_burst (3+ fillers in 10s window, overlapping merged)
+- repair_restart (repeated words within 0.7s, repair markers)
+- Each event has type, start/end, severity, score, evidence, message
+
+
+5. SHARED LIBRARIES (lib/)
+---------------------------
+- api-zod/ - Zod schemas and TypeScript types (OpenAPI-generated)
+- api-contract/ - API contract definitions
+- api-client-react/ - React Query hooks for API calls
+- db/ - Database schema (Drizzle ORM) - sessions table design
+- integrations/ - Third-party integrations
+
+6. KEY TECHNIQUES & PRINCIPLES
+-------------------------------
+- Reference-only approach: Study external repos for ideas, reimplement in own code
+- No fake defaults: Missing measurements return null/"not available"/explicit errors
+- Word-boundary matching for fillers (prevents false positives like "number")
+- True timestamps from word-level data, never estimated
+- Acoustic features computed independently with per-feature error handling
+- LLM used only for content scoring, never for audio-based metrics
+- Editable transcript flow for re-scoring without re-upload
+- Event-driven feedback with evidence-based recommendations
+- Privacy-first: video processing can run in-browser (MediaPipe), raw video not stored by default
+- Deterministic metrics are pure/testable functions
+- Comprehensive unit tests for metrics, events, scoring
+- Rate limiting on analyze/transcribe endpoints
+- CORS configuration via env vars
+
+7. DEPENDENCIES & TOOLS
+-----------------------
+Frontend: React, Vite, Tailwind, Radix UI, MediaPipe, Clerk, TanStack Query, Wouter
+Backend: Express, Zod, Pino, Drizzle ORM, express-rate-limit
+ASR: faster-whisper, librosa, numpy, PyAV
+Testing: Node test runner (backend), pytest/unittest (Python)
+Build: esbuild, Vite
+
+8. WORKFLOW
+-----------
+1. User records video/audio in browser (Practice Room)
+2. Audio transcribed via API -> ASR service (faster-whisper) with word timestamps
+3. Deterministic metrics computed from transcript/word timings
+4. Acoustic features extracted from audio
+5. Content scored by LLM (grammar/vocab/structure/relevance)
+6. Unified scoring combines all modalities
+7. Speech events detected from timestamps
+8. Event-aware feedback generated
+9. Results displayed with timeline, scores, recommendations
+10. Session saved for history/progress tracking
+
+
+9. DETAILED API ENDPOINTS
+------------------------
+Health:
+- GET /api/health - Health check
+
+Transcribe/Speech:
+- POST /api/speech/transcribe - Transcribe audio with word timestamps (uses ASR service)
+- POST /api/speech/analyze - Analyze speech/transcript
+
+Analyze:
+- POST /api/analyze - Full analysis of recording (transcript + metrics + acoustics)
+- POST /api/analyze/content - LLM content scoring only (grammar, vocab, structure, relevance)
+- POST /api/analyze/retry - Re-score with edited transcript (uses previous session prompt)
+- GET /api/analyze/history - User's session history (per-user, requires auth)
+- GET /api/analyze/session/:id - Get specific session
+- POST /api/analyze/save - Save session results
+
+10. METRICS COMPUTED
+--------------------
+Deterministic (from transcript/word timestamps):
+- WPM (words per minute) over total duration
+- Articulation rate (excluding pauses)
+- Pause detection: count, total time, average, longest (gap > 0.8s)
+- Fillers: scored fillers (um, uh, er, ah, you know, I mean, sort of, kind of) via word-boundary regex
+- Possible fillers reported separately (like, so, right, actually, basically, literally)
+- Lexical diversity (type-token ratio on fixed window)
+- Average sentence length
+- Tempo stability (std of WPM across segments)
+
+Acoustic (from audio):
+- Pitch variation in semitones (std of log-frequency via librosa.pyin)
+- Voiced ratio
+- Energy variation (RMS coefficient of variation)
+- Silence ratio and intervals (via librosa.effects.split with top_db)
+- All with per-feature null-on-failure
+
+Content (LLM):
+- Grammar, Vocabulary, Structure, Relevance scores (1-10)
+- Specific grammar mistakes with corrections
+- Strengths, improvements, actionable tips
+- Rubric-based scoring with anchors per band
+
+Unified Scoring:
+- Fluency (from deterministic metrics)
+- Delivery (from acoustics)
+- Content (from LLM)
+- Overall score with weights/thresholds as named constants
+- Fluency gating multiplier
+- Pace scored against 120-160 WPM band
+
+11. SPEECH EVENTS
+-----------------
+- silence_event: gaps > 0.8s (medium) and > 1.5s (high)
+- filler_burst: 3+ scored fillers in 10s sliding window (merged)
+- repair_restart: repeated word within 0.7s or repair markers (I mean, sorry, let me rephrase, what I meant was)
+- Each event: type, start, end, severity, score, evidence, message
+
+12. FRONTEND COMPONENTS (key)
+-----------------------------
+- App.tsx - Main app with routing, auth (Clerk), session management
+- pages/intro.tsx - Landing/welcome screen
+- components/voice-lab.tsx - Main practice interface
+- components/onboarding-tutorial.tsx - First-run tutorial
+- components/realtime-monitor.tsx / lib/realtime-monitor.ts - Real-time metrics
+- components/content-results.tsx - Content scoring display
+- components/content-radar.tsx - Radar chart for content scores
+- components/score-card.tsx - Score display cards
+- components/ui/* - Radix UI components (shadcn/ui style)
+- lib/delivery.ts - API calls with timeout (45s)
+- data/practice-questions.ts - Question banks for modes
+
+
+13. AUTHENTICATION & DATA
+------------------------
+- Clerk authentication (sign-in/sign-up)
+- Per-user session history (user-scoped)
+- Sessions stored with transcript, metrics, acoustics, scores, feedback, events
+- No persistence of raw video by default (privacy-first)
+- DB schema via Drizzle ORM in lib/db
+
+14. VIDEO/BODY LANGUAGE (Planned/Implemented)
+--------------------------------------------
+- MediaPipe integration for pose/gaze tracking (browser-based)
+- Eye contact: calibrated baseline, iris position vs eye corners, head pose compensation
+- Posture: shoulder tilt, head tilt, body lean
+- Fidgeting vs gestures: motion analysis
+- Expressiveness: smile, EAR, brow tension (variation over time)
+- Events: look_away_event, fidget_burst, posture_drift
+- Numeric time series sent to backend, raw video stays on device
+
+15. DEVELOPMENT & TESTING
+------------------------
+- Monorepo with pnpm workspaces
+- TypeScript throughout frontend/backend
+- Python for ASR service
+- Tests: Node test runner for API, pytest/unittest for ASR
+- Type checking across packages
+- Orval for API client generation from OpenAPI
+- Build system with esbuild/Vite
+

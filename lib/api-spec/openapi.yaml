@@ -33,8 +33,8 @@ paths:
       tags: [analyze]
       summary: Analyze a spoken answer
       description: >-
-        Compute delivery metrics and indicator scores from a transcript captured in
-        the browser and the measured duration of the recording.
+        Compute deterministic delivery metrics and return independent, transcript-only
+        content scores. Content-score failure never fabricates a score.
       requestBody:
         required: true
         content:
@@ -43,7 +43,7 @@ paths:
               $ref: "#/components/schemas/AnalyzeRequest"
       responses:
         "200":
-          description: Analysis result
+          description: Analysis result; content analysis may be explicitly unavailable while deterministic metrics remain present
           content:
             application/json:
               schema:
@@ -73,6 +73,36 @@ paths:
                 $ref: "#/components/schemas/AnalyzeResponse"
         "404":
           description: Unknown session
+  /analyze/content:
+    post:
+      operationId: reanalyzeContent
+      tags: [analyze]
+      summary: Score an edited transcript
+      description: Re-runs content scoring only; callers can independently refresh deterministic transcript metrics.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                transcript: { type: string }
+                prompt_text: { type: string }
+                mode: { type: string, enum: [general, interview, debate] }
+              required: [transcript]
+      responses:
+        "200":
+          description: Content analysis or explicit unavailable state
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  content_analysis:
+                    $ref: "#/components/schemas/ContentAnalysis"
+                required: [content_analysis]
+        "400":
+          description: Invalid request
   /analyze/retry:
     post:
       operationId: retryAnalysis
@@ -190,6 +220,35 @@ paths:
           description: Invalid request
 components:
   schemas:
+    ContentScoreSet:
+      type: object
+      properties:
+        grammar: { type: [number, "null"], minimum: 0, maximum: 10 }
+        vocabulary: { type: [number, "null"], minimum: 0, maximum: 10 }
+        structure: { type: [number, "null"], minimum: 0, maximum: 10 }
+        relevance: { type: [number, "null"], minimum: 0, maximum: 10 }
+      required: [grammar, vocabulary, structure, relevance]
+    GrammarMistake:
+      type: object
+      properties:
+        quote: { type: string }
+        correction: { type: string }
+        explanation: { type: string }
+      required: [quote, correction, explanation]
+    ContentAnalysis:
+      type: object
+      properties:
+        status: { type: string, enum: [available, partial, unavailable] }
+        scores:
+          $ref: "#/components/schemas/ContentScoreSet"
+        grammar_mistakes:
+          type: array
+          items: { $ref: "#/components/schemas/GrammarMistake" }
+        strengths: { type: array, items: { type: string } }
+        weaknesses: { type: array, items: { type: string } }
+        suggestions: { type: array, items: { type: string } }
+        error: { type: string }
+      required: [status, scores, grammar_mistakes, strengths, weaknesses, suggestions]
     AnalyzeRequest:
       type: object
       description: >-
@@ -203,6 +262,13 @@ components:
           description: Length of the recording in seconds
         audio_url:
           type: string
+        prompt_text:
+          type: string
+          description: Prompt/topic used for relevance scoring
+        mode:
+          type: string
+          enum: [general, interview, debate]
+          default: general
         segments:
           type: array
           items:
@@ -341,6 +407,13 @@ components:
           type: array
           items:
             type: string
+        content_analysis:
+          $ref: "#/components/schemas/ContentAnalysis"
+        mode:
+          type: string
+          enum: [general, interview, debate]
+        prompt_text:
+          type: string
       required:
         - session_id
         - audio_url
@@ -350,6 +423,7 @@ components:
         - scores
         - feedback
         - grammar_mistakes
+        - content_analysis
     RetryResponse:
       allOf:
         - $ref: "#/components/schemas/AnalyzeResponse"
@@ -440,6 +514,30 @@ components:
           items:
             $ref: "#/components/schemas/WordTiming"
       required: [transcript]
+    AcousticFeatures:
+      type: object
+      description: >-
+        Audio-derived delivery measurements. A null field means the individual signal
+        could not be measured; no scores or fallback values are generated.
+      properties:
+        pitch_variation_semitones: { type: [number, "null"] }
+        voiced_ratio: { type: [number, "null"], minimum: 0, maximum: 1 }
+        energy_variation_cv: { type: [number, "null"], minimum: 0 }
+        silence_ratio: { type: [number, "null"], minimum: 0, maximum: 1 }
+        silence_intervals:
+          type: [array, "null"]
+          items:
+            type: object
+            properties:
+              start: { type: number }
+              end: { type: number }
+            required: [start, end]
+      required:
+        - pitch_variation_semitones
+        - voiced_ratio
+        - energy_variation_cv
+        - silence_ratio
+        - silence_intervals
     TranscribeResponse:
       type: object
       properties:
@@ -451,4 +549,6 @@ components:
         duration_sec: { type: number }
         metrics:
           $ref: "#/components/schemas/SpeechMetrics"
-      required: [transcript, words, duration_sec, metrics]
+        acoustics:
+          $ref: "#/components/schemas/AcousticFeatures"
+      required: [transcript, words, duration_sec, metrics, acoustics]

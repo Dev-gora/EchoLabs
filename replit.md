@@ -8,8 +8,8 @@ _Replace the heading above with the project's name, and this line with one sente
 - `cd artifacts/asr-service && pip install -r requirements.txt && python app.py` — local transcription service (port 8001)
 - `cd artifacts/api-server && node --test tests/*.test.ts` — deterministic metric tests
 - `cd artifacts/asr-service && python -m unittest discover -s tests` — ASR validation tests
-- `pnpm --filter @workspace/fusion-coach run dev` — run the Fusion Coach web app (port 5000, LAN-visible)
-- `pnpm --filter @workspace/fusion-coach run dev:local` — same, bound to localhost only
+- `pnpm --filter @workspace/echo-labs run dev` — run the EchoLabs web app (port 5000, LAN-visible)
+- `pnpm --filter @workspace/echo-labs run dev:local` — same, bound to localhost only
 - Note: a shell that exports `PORT=0` is handled — the app falls back to port 5000 with a warning
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
@@ -34,10 +34,10 @@ _Replace the heading above with the project's name, and this line with one sente
 - `artifacts/api-server/src/lib/metrics.ts` — deterministic metrics (WPM, articulation rate, pauses from word timings, word-boundary fillers, lexical diversity); pure, unit-tested
 - `artifacts/api-server/src/routes/speech.ts` — `POST /transcribe` (proxies the ASR service) and `POST /analyze/metrics` (re-scores edited text)
 - `artifacts/asr-service/` — local faster-whisper service (Python). Required for transcription; see its README
-- `artifacts/fusion-coach/src/components/voice-lab.tsx` — record/upload, editable transcript, re-score view
+- `artifacts/echo-labs/src/components/voice-lab.tsx` — record/upload, editable transcript, re-score view
 - `artifacts/api-server/scripts/smoke-analyze.mjs` — HTTP smoke test for the analyze flow (`node scripts/smoke-analyze.mjs` against a running server)
-- `artifacts/fusion-coach/src/App.tsx` — the live coaching surface (camera, mic, Web Speech transcript)
-- `artifacts/fusion-coach/src/lib/realtime-monitor.ts` — the realtime voice monitor: 7s personal baseline, 0.5s blocks, z-score violations, live alerts and the exponential monitor scores
+- `artifacts/echo-labs/src/App.tsx` — the live coaching surface (camera, mic, Web Speech transcript)
+- `artifacts/echo-labs/src/lib/realtime-monitor.ts` — the realtime voice monitor: 7s personal baseline, 0.5s blocks, z-score violations, live alerts and the exponential monitor scores
 - `.agents/memory/evaluation-integrity.md` — rules for how scores and evidence may be described
 
 ## Architecture decisions

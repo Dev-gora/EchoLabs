@@ -21,7 +21,6 @@ import os
 import tempfile
 import threading
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -85,12 +84,14 @@ class Transcription:
     transcript: str
     words: list[dict[str, Any]]
     duration_sec: float
+    acoustics: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "transcript": self.transcript,
             "words": self.words,
             "duration_sec": round(self.duration_sec, 3),
+            "acoustics": self.acoustics,
         }
 
 
@@ -187,20 +188,26 @@ def build_transcription(
 
 # --- model -----------------------------------------------------------------
 
+_model = None
 _model_lock = threading.Lock()
 
 
-@lru_cache(maxsize=1)
 def get_model():
     """Loads the model once. The first call may download weights."""
-    from faster_whisper import WhisperModel
-
+    global _model
+    if _model is not None:
+        return _model
     with _model_lock:
-        return WhisperModel(
+        if _model is not None:
+            return _model
+        from faster_whisper import WhisperModel
+
+        _model = WhisperModel(
             WHISPER_MODEL,
             device=WHISPER_DEVICE,
             compute_type=WHISPER_COMPUTE_TYPE,
         )
+        return _model
 
 
 def decode_audio(path: str):
@@ -271,7 +278,17 @@ def transcribe_bytes(data: bytes, suffix: str) -> Transcription:
             vad_filter=False,
         )
 
-        return build_transcription(list(segments), duration)
+        transcription = build_transcription(list(segments), duration)
+        # Keep the temporary source available to the separate acoustic module;
+        # it is removed by this function's finally block after all features run.
+        from acoustics import analyze_audio
+
+        return Transcription(
+            transcript=transcription.transcript,
+            words=transcription.words,
+            duration_sec=transcription.duration_sec,
+            acoustics=analyze_audio(path, duration, samples=samples, sample_rate=SAMPLE_RATE),
+        )
     except AudioRejected:
         raise
     except Exception as exc:  # noqa: BLE001 - surfaced as a clean 422 to the caller

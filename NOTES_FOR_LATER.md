@@ -55,6 +55,20 @@ Session/prompt identity, audio reference, transcript, duration, wpm, fillers, pa
 word count, four scores, feedback JSON, grammar mistakes JSON, `attempt_number`,
 `original_session_id`, timestamps. No tables until Step 7, per the standing decision.
 
+## Step 4 — exercise generation (from VoiceLens `build_exercises()`)
+
+- Idea: derive practice exercises from **this user's measured patterns** instead of a
+  generic list — branch on their own numbers (filler set non-empty -> silent-pause drill
+  naming their top filler; wpm below range -> breathing/forward-voice drill; wpm above
+  range -> deliberate slow-read; in range -> pace-variation drill), and always finish
+  with a short no-filler intro in front of a mirror.
+- Use the branch values as *inputs to the wording*, not as scores: we already have
+  scored fillers, possible fillers, wpm, articulation rate, pauses and (Step 2) pitch /
+  energy / silence, so the copy can cite the real figure.
+- Do NOT copy its scoring or the thresholds blindly (120/160 wpm is a claim, not a
+  measurement): any threshold we keep must be a named constant with a reason.
+- Not for Step 4's scoring itself; this is feedback-layer content after the scores exist.
+
 ## Step 4/5 — MultimodalCoach (not read in depth yet)
 
 Parked until those steps are prompted.

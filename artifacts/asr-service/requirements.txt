@@ -3,3 +3,5 @@
 faster-whisper>=1.1,<2
 fastapi>=0.115
 uvicorn[standard]>=0.30
+# Local acoustic delivery features (pYIN pitch, RMS energy, silence intervals).
+librosa>=0.10.2,<1.1

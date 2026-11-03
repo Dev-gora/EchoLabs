@@ -5,27 +5,22 @@ import { defineConfig } from 'vite';
 
 import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
 
-const rawPort = process.env.PORT;
+const DEFAULT_PORT = 5000;
 
-if (!rawPort) {
-  throw new Error(
-    'PORT environment variable is required but was not provided.',
+// Fall back to the default when PORT is unset or unusable (e.g. a shell that
+// exports PORT=0), so local `pnpm dev` always serves on localhost without crashing.
+const rawPort = process.env.PORT?.trim() ?? '';
+const parsedPort = Number(rawPort);
+const hasUsablePort =
+  rawPort !== '' && Number.isFinite(parsedPort) && parsedPort > 0 && parsedPort <= 65535;
+if (rawPort !== '' && !hasUsablePort) {
+  console.warn(
+    `[vite-config] Ignoring unusable PORT "${rawPort}" — serving on ${DEFAULT_PORT} instead.`,
   );
 }
+const port = hasUsablePort ? parsedPort : DEFAULT_PORT;
 
-const port = Number(rawPort);
-
-if (Number.isNaN(port) || port <= 0) {
-  throw new Error(`Invalid PORT value: "${rawPort}"`);
-}
-
-const basePath = process.env.BASE_PATH;
-
-if (!basePath) {
-  throw new Error(
-    'BASE_PATH environment variable is required but was not provided.',
-  );
-}
+const basePath = process.env.BASE_PATH || '/';
 
 export default defineConfig({
   base: basePath,
@@ -72,10 +67,22 @@ export default defineConfig({
     fs: {
       strict: true,
     },
+    proxy: {
+      '/api': {
+        target: process.env.API_PROXY_TARGET ?? 'http://127.0.0.1:5001',
+        changeOrigin: true,
+      },
+    },
   },
   preview: {
     port,
     host: '0.0.0.0',
     allowedHosts: true,
+    proxy: {
+      '/api': {
+        target: process.env.API_PROXY_TARGET ?? 'http://127.0.0.1:5001',
+        changeOrigin: true,
+      },
+    },
   },
 });

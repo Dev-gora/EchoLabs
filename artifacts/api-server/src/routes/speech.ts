@@ -1,5 +1,8 @@
 import express, { Router, type IRouter } from "express";
 import { computeSpeechMetrics, type WordTiming } from "../lib/metrics";
+import { detectSpeechEvents } from "../lib/speech-events";
+import { computeUnifiedScores, type AcousticFeatures as UnifiedAcousticFeatures } from "../lib/unified-scoring";
+import { generateEventAwareFeedback } from "../lib/event-feedback";
 
 /**
  * Speech endpoints for the post-recording flow:
@@ -40,15 +43,37 @@ const ASR_SERVICE_URL = process.env.ASR_SERVICE_URL ?? "http://127.0.0.1:8001";
 /** Transcription is CPU bound; a cold model load can take tens of seconds. */
 const ASR_TIMEOUT_MS = Number(process.env.ASR_TIMEOUT_MS ?? 120_000);
 
+type AcousticFeatures = {
+  pitch_variation_semitones: number | null;
+  voiced_ratio: number | null;
+  energy_variation_cv: number | null;
+  silence_ratio: number | null;
+  silence_intervals: Array<{ start: number; end: number }> | null;
+};
+
 type TranscribeResponse = {
   transcript: string;
   words: WordTiming[];
   duration_sec: number;
+  acoustics: AcousticFeatures;
 };
 
 function extensionOf(filename: string): string {
   const dot = filename.lastIndexOf(".");
   return dot === -1 ? "" : filename.slice(dot + 1).toLowerCase();
+}
+
+function isAcousticFeatures(value: unknown): value is AcousticFeatures {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  const nullableNumber = (entry: unknown) => entry === null || (typeof entry === "number" && Number.isFinite(entry));
+  return (
+    nullableNumber(item.pitch_variation_semitones) &&
+    nullableNumber(item.voiced_ratio) &&
+    nullableNumber(item.energy_variation_cv) &&
+    nullableNumber(item.silence_ratio) &&
+    (item.silence_intervals === null || Array.isArray(item.silence_intervals))
+  );
 }
 
 function reject(res: express.Response, status: number, error: string, message: string) {
@@ -140,7 +165,13 @@ router.post(
       return;
     }
 
-    if (!payload || !("transcript" in payload) || !("words" in payload)) {
+    if (
+      !payload ||
+      !("transcript" in payload) ||
+      !("words" in payload) ||
+      !("acoustics" in payload) ||
+      !isAcousticFeatures(payload.acoustics)
+    ) {
       reject(res, 502, "bad_upstream_response", "The transcription service returned an unexpected response.");
       return;
     }
@@ -156,6 +187,7 @@ router.post(
       words: payload.words,
       duration_sec: payload.duration_sec,
       metrics,
+      acoustics: payload.acoustics,
     });
   },
 );
@@ -193,6 +225,54 @@ router.post("/analyze/metrics", (req, res) => {
       durationSec: duration,
     }),
   });
+});
+
+router.post("/analyze/events", (req, res) => {
+  const body = (req.body ?? {}) as {
+    transcript?: unknown;
+    words?: unknown;
+    duration_sec?: unknown;
+    silence_intervals?: unknown;
+  };
+
+  if (typeof body.transcript !== "string" || body.transcript.trim().length === 0) {
+    reject(res, 400, "invalid_request", "Expected a non-empty transcript.");
+    return;
+  }
+
+  const words = Array.isArray(body.words) ? (body.words as WordTiming[]) : null;
+  const duration = typeof body.duration_sec === "number" && Number.isFinite(body.duration_sec) ? body.duration_sec : null;
+  const silenceIntervals = Array.isArray(body.silence_intervals) ? (body.silence_intervals as Array<{ start: number; end: number }>) : null;
+
+  const events = detectSpeechEvents({ transcript: body.transcript, words, durationSec: duration, silenceIntervals });
+  res.json({ events });
+});
+
+router.post("/analyze/unified", async (req, res) => {
+  const body = (req.body ?? {}) as {
+    transcript?: unknown;
+    words?: unknown;
+    duration_sec?: unknown;
+    acoustics?: unknown;
+    content_analysis?: unknown;
+  };
+
+  if (typeof body.transcript !== "string" || body.transcript.trim().length === 0) {
+    reject(res, 400, "invalid_request", "Expected a non-empty transcript.");
+    return;
+  }
+
+  const words = Array.isArray(body.words) ? (body.words as WordTiming[]) : null;
+  const duration = typeof body.duration_sec === "number" && Number.isFinite(body.duration_sec) ? body.duration_sec : null;
+  const metrics = computeSpeechMetrics({ transcript: body.transcript, words, durationSec: duration });
+  const acoustics = body.acoustics && typeof body.acoustics === "object" ? (body.acoustics as UnifiedAcousticFeatures) : null;
+  const content = body.content_analysis && typeof body.content_analysis === "object" ? (body.content_analysis as any) : null;
+
+  const unified = computeUnifiedScores({ metrics, acoustics, content, words: words as any });
+  const events = detectSpeechEvents({ transcript: body.transcript, words, durationSec: duration, silenceIntervals: acoustics?.silence_intervals ?? null });
+  const feedback = await generateEventAwareFeedback({ scores: unified, events, metrics });
+
+  res.json({ unified_scores: unified, events, event_feedback: feedback });
 });
 
 export default router;
