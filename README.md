@@ -57,11 +57,34 @@ The frontend expects these environment variables before it starts:
 
 - `VITE_CLERK_PUBLISHABLE_KEY`
 
-Copy `artifacts/fusion-coach/.env.example` to `artifacts/fusion-coach/.env` if
-a template exists, otherwise create `.env` next to `package.json` with
+Copy `artifacts/fusion-coach/.env.example` to `artifacts/fusion-coach/.env`:
+
+```bash
+# from the project root
+cp artifacts/fusion-coach/.env.example artifacts/fusion-coach/.env
+```
+
+Or use the first-run helper that ships with the frontend:
+
+```bash
+# Windows PowerShell
+cd artifacts/fusion-coach
+.
+start-platform.ps1
+
+# macOS / Linux
+cd artifacts/fusion-coach
+chmod +x start-platform.sh
+./start-platform.sh
+```
+
+That helper will install dependencies if needed, create a local `.env`,
+and start `npm run dev` for you.
+
+If you prefer to set up manually, create `artifacts/fusion-coach/.env` with:
 
 ```env
-VITE_CLERK_PUBLISHABLE_KEY=pk_test_...your-key-here...
+VITE_CLERK_PUBLISHABLE_KEY=pk_test_ZmFpdGhmdWwtZ25hdC03NTY1LmNsZXJrLmFjY291bnRzLmRldiQ
 ```
 
 The publishable key is not a secret; it is safe to keep in your local `.env`.
