@@ -1,23 +1,58 @@
-import { useEffect, useRef, useState } from 'react';
-import { useAuth } from '@clerk/clerk-react';
-import { Camera, ChevronRight, Circle, Mic, Settings, CheckCircle2, Calendar, User, LogOut, Shield, Search, HelpCircle, Package, MessageCircle, LogIn, UserPlus } from 'lucide-react';
-import { Card, Tabs, TabsList, TabsTrigger, TabsContent, Input, Label, Select, SelectItem, SelectTrigger, SelectValue, Switch, SwitchTrack, SwitchThumb, Badge } from '@/components/ui';
-import { CalendarIcon } from 'lucide-react';
-import { useToast } from '@/lib/use-toast';
-import { supabase } from '@/integrations/supabase';
+import {
+  SignedIn,
+  SignedOut,
+  SignIn,
+  SignUp,
+  UserButton,
+} from '@clerk/clerk-react';
 
-// Types
+import {
+  useState,
+  useEffect,
+  useRef,
+  useCallback,
+  Suspense,
+} from 'react';
+import { ClerkProviderWithRouter } from '@/lib/clerk-provider-with-router';
+import { useAuth as useAuthSafe } from '@clerk/clerk-react';
+import type { UseAuthReturn } from '@clerk/clerk-react';
+
+import {
+  Camera,
+  ChevronRight,
+  Circle,
+  Mic,
+  LogOut,
+  Shield,
+} from 'lucide-react';
+import {
+  Card,
+  Input,
+  Label,
+  Select,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+  Badge,
+} from '@/components/ui';
+import { toast } from '@/lib/use-toast';
+import {
+  baseClient,
+  type EchoLabsSupabaseClient,
+  fetchUserSessions,
+  insertSession,
+  updateSessionScore,
+} from '@/integrations/supabase';
+
 type HistoryItem = {
   id: string;
   userId: string;
   username: string;
   date: string;
-  score: number;
+  score: number | null;
   status: 'completed' | 'guest' | 'failed';
   mistakes: { time: number; label: string; kind: 'good' | 'issue' }[];
 };
-
-type AuthStep = 'chooser' | 'new-account' | 'guest' | 'signed-in';
 
 type SessionStats = {
   totalSessions: number;
@@ -26,22 +61,12 @@ type SessionStats = {
   totalWords: number;
 };
 
-const MIN_SPEECH_WORDS = 40;
-const MIN_SPEECH_SECONDS = 20;
-const MIN_SESSION_SECONDS = 30;
-
-// Camera/Mic selector types
 type CameraDevice = { deviceId: string; label: string };
 type MicDevice = { deviceId: string; label: string };
 
-function Home() {
-  const [authStep, setAuthStep] = useState<AuthStep>('chooser');
-  const [identityName, setIdentityName] = useState('');
+function AppContent() {
   const [active, setActive] = useState(false);
   const [completed, setCompleted] = useState(false);
-  const [cameraEnabled, setCameraEnabled] = useState(false);
-  const [micEnabled, setMicEnabled] = useState(false);
-  const [permissionDenied, setPermissionDenied] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [score, setScore] = useState<number | null>(null);
@@ -49,188 +74,181 @@ function Home() {
   const [speechSeconds, setSpeechSeconds] = useState(0);
   const [audioLevel, setAudioLevel] = useState(0);
   const [transcript, setTranscript] = useState('');
-  const [frequencyData, setFrequencyData] = useState<number[]>(Array.from({ length: 24 }, () => 0));
-  const [faceBox, setFaceBox] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
-  const [faceKeypoints, setFaceKeypoints] = useState<Array<{ x: number; y: number; z?: number; visibility?: number }>>([]);
+  const [faceBox, setFaceBox] = useState<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null>(null);
+  const [faceKeypoints, setFaceKeypoints] = useState<
+    Array<{ x: number; y: number; z?: number; visibility?: number }>
+  >([]);
   const [cameraDevices, setCameraDevices] = useState<CameraDevice[]>([]);
   const [micDevices, setMicDevices] = useState<MicDevice[]>([]);
-  [selectedCamera, setSelectedCamera] = useState<CameraDevice | null>(null);
-  [selectedMic, setSelectedMic] = useState<MicDevice | null>(null);
+  const [selectedCamera, setSelectedCamera] = useState<CameraDevice | null>(
+    null,
+  );
+  const [selectedMic, setSelectedMic] = useState<MicDevice | null>(null);
+  const [userClient, setUserClient] = useState<EchoLabsSupabaseClient | null>(
+    null,
+  );
 
-  const { isLoaded, user, session, setActiveSession, createSession, updateSession, signIn, signUp, signOut, webhook } = useAuth();
-  const { open: openToast } = useToast();
+  const auth = useAuthSafe();
+  const user = auth as UseAuthReturn & {
+    fullName?: string;
+    emailAddresses?: Array<{ emailAddress?: string }>;
+    id?: string;
+  };
+  const signOut = auth.signOut;
 
-  // Load user preferences from localStorage
+  useEffect(() => {
+    let cancelled = false;
+
+    async function bindClient() {
+      if (!user?.id) {
+        setUserClient(baseClient);
+        return;
+      }
+      const getToken = async () => {
+        try {
+          const token = await user.getToken();
+          return typeof token === 'string' ? token : null;
+        } catch {
+          return null;
+        }
+      };
+      const client = await import('@/integrations/supabase').then(
+        (m) =>
+          m.getAuthenticatedClient(getToken) as Promise<EchoLabsSupabaseClient>,
+      );
+      if (!cancelled) setUserClient(client);
+    }
+
+    bindClient();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
   useEffect(() => {
     const saved = localStorage.getItem('echo_labs_user_prefs');
     if (saved) {
-      const prefs = JSON.parse(saved);
-      setSelectedCamera(prefs.selectedCamera || null);
-      setSelectedMic(prefs.selectedMic || null);
+      try {
+        const prefs = JSON.parse(saved);
+        setSelectedCamera(prefs.selectedCamera || null);
+        setSelectedMic(prefs.selectedMic || null);
+      } catch {
+        /* ignore bad JSON */
+      }
     }
   }, []);
 
-  // Save user preferences to localStorage
   useEffect(() => {
-    localStorage.setItem('echo_labs_user_prefs', JSON.stringify({ selectedCamera: selectedCamera?.deviceId, selectedMic: selectedMic?.deviceId }));
+    localStorage.setItem(
+      'echo_labs_user_prefs',
+      JSON.stringify({
+        selectedCamera: selectedCamera?.deviceId,
+        selectedMic: selectedMic?.deviceId,
+      }),
+    );
   }, [selectedCamera, selectedMic]);
 
-  // Fetch camera and mic devices on mount
   useEffect(() => {
-    if (typeof navigator.mediaDevices !== 'undefined' && navigator.mediaDevices.enumerateDevices) {
-      navigator.mediaDevices.enumerateDevices()
-        .then(devices => {
-          const cameras = devices.filter(d => d.kind === 'videoinput').map((d: any) => ({ deviceId: d.deviceId, label: d.label || `Camera ${devices.indexOf(d) + 1}` }));
-          const mics = devices.filter(d => d.kind === 'audioinput').map((d: any) => ({ deviceId: d.deviceId, label: d.label || `Mic ${devices.indexOf(d) + 1}` }));
-          setCameraDevices(cameras);
-          setMicDevices(mics);
-          // Select first available devices
-          if (cameras.length > 0) setSelectedCamera(cameras[0]);
-          if (mics.length > 0) setSelectedMic(mics[0]);
-        })
-        .catch(err => console.error('Error enumerating devices:', err));
-    }
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+
+    navigator.mediaDevices
+      .enumerateDevices()
+      .then((devices) => {
+        const cameras = devices
+          .filter((d) => d.kind === 'videoinput')
+          .map((d) => ({
+            deviceId: d.deviceId,
+            label:
+              d.label || `Camera ${devices.indexOf(d) + 1}`,
+          }));
+        const mics = devices
+          .filter((d) => d.kind === 'audioinput')
+          .map((d) => ({
+            deviceId: d.deviceId,
+            label: `Mic ${devices.indexOf(d) + 1}`,
+          }));
+        setCameraDevices(cameras);
+        setMicDevices(mics);
+        if (cameras.length > 0) setSelectedCamera(cameras[0]);
+        if (mics.length > 0) setSelectedMic(mics[0]);
+      })
+      .catch((err) => console.error('Error enumerating devices:', err));
   }, []);
 
-  // Auth step navigation
-  const handleNext = () => {
-    if (!identityName.trim()) return;
-    setAuthStep('new-account');
-  };
-
-  const handleGuest = () => {
-    setAuthStep('guest');
-  };
-
-  const handleSignIn = () => {
-    setAuthStep('signed-in');
-  };
-
-  const chooseGuest = () => {
-    // Guest mode - create a guest session
-    setAuthStep('signed-in');
-    // Initialize guest session
-    const guestSession = {
-      id: 'guest-' + Date.now(),
-      userId: 'guest-' + Date.now(),
-      username: 'Guest',
-      date: new Date().toISOString(),
-      status: 'guest',
-      score: null,
-      mistakes: []
-    };
-    // Store guest session locally
-    localStorage.setItem('current_guest_session', JSON.stringify(guestSession));
-    setActive(true);
-    setCompleted(false);
-    setScore(null);
-    setSpeechWords(0);
-    setSpeechSeconds(0);
-    setAudioLevel(0);
-    setTranscript('');
-    setFrequencyData(Array.from({ length: 24 }, () => 0));
-    setFaceBox(null);
-    setFaceKeypoints([]);
-    openToast({
-      title: 'Guest Mode',
-      description: 'You can start a guest session. Your score and history will not be saved.',
-    });
-  };
-
-  const chooseNewAccount = () => {
-    setAuthStep('new-account');
-  };
-
-  const handleCreateAccount = async () => {
-    if (!identityName.trim()) return;
-    try {
-      await signUp({ 
-        email: `${identityName.toLowerCase().replace(' ', '.')}${Date.now()}@example.com`, 
-        password: 'password123',
-        firstName: identityName.split(' ')[0] || 'User',
-        lastName: identityName.split(' ').slice(1).join(' ') || 'User'
-      });
-      setAuthStep('signed-in');
-      openToast({
-        title: 'Account Created',
-        description: 'Your account has been created successfully!',
-      });
-    } catch (error) {
-      console.error('Sign up error:', error);
-      openToast({
-        title: 'Error',
-        description: 'Failed to create account. Please try again.',
-        variant: 'destructive',
-      });
-    }
-  };
-
-  const handleSignInAction = async () => {
-    try {
-      await signIn({ 
-        strategy: 'password',
-        emailPassword: {
-          email: `${identityName.toLowerCase().replace(' ', '.')}@example.com`,
-          password: 'password123'
-        }
-      });
-      setAuthStep('signed-in');
-      openToast({
-        title: 'Signed In',
-        description: 'Welcome back!',
-      });
-    } catch (error) {
-      console.error('Sign in error:', error);
-      openToast({
-        title: 'Error',
-        description: 'Failed to sign in. Please try again.',
-        variant: 'destructive',
-      });
-    }
-  };
-
-  // History data from Supabase
   const [history, setHistory] = useState<HistoryItem[]>([]);
-  const [userStats, setUserStats] = useState<SessionStats>({ totalSessions: 0, averageScore: 0, totalTime: 0, totalWords: 0 });
+  const [userStats, setUserStats] = useState<SessionStats>({
+    totalSessions: 0,
+    averageScore: 0,
+    totalTime: 0,
+    totalWords: 0,
+  });
+
+  const fetchHistory = useCallback(async () => {
+    if (!user?.id || !userClient) {
+      setHistory([]);
+      return;
+    }
+    try {
+      const items = await fetchUserSessions(userClient, user.id);
+      setHistory(
+        items.map((item) => ({
+          id: item.id,
+          userId: user.id,
+          username:
+            user.fullName ||
+            user.emailAddresses[0]?.emailAddress?.split('@')[0] ||
+            'User',
+          date: item.date,
+          score: item.score,
+          status: 'completed' as const,
+          mistakes: [],
+        })),
+      );
+    } catch (error) {
+      console.error('Error fetching history:', error);
+    }
+  }, [user, userClient]);
+
+  const fetchUserStats = useCallback(async () => {
+    if (!user?.id) {
+      setUserStats({
+        totalSessions: 0,
+        averageScore: 0,
+        totalTime: 0,
+        totalWords: 0,
+      });
+      return;
+    }
+    try {
+      const calculatedSessions = typeof window !== 'undefined' ? history : [];
+      setUserStats({
+        totalSessions: calculatedSessions.length,
+        averageScore:
+          calculatedSessions.length > 0
+            ? calculatedSessions.reduce((s, i) => s + (i.score ?? 0), 0) /
+              calculatedSessions.length
+            : 0,
+        totalTime: 0,
+        totalWords: 0,
+      });
+    } catch (error) {
+      console.error('Error fetching user stats:', error);
+    }
+  }, [user?.id, history]);
 
   useEffect(() => {
     if (user?.id) {
       fetchHistory();
       fetchUserStats();
     }
-  }, [user?.id]);
+  }, [user?.id, fetchHistory, fetchUserStats]);
 
-  const fetchHistory = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('session_history')
-        .select('*')
-        .order('date', { ascending: false });
-      
-      if (error) throw error;
-      setHistory(data || []);
-    } catch (error) {
-      console.error('Error fetching history:', error);
-    }
-  };
-
-  const fetchUserStats = async () => {
-    try {
-      const { data, error } = await supabase
-        .from('user_stats')
-        .select('*')
-        .eq('user_id', user?.id)
-        .single();
-      
-      if (error) throw error;
-      setUserStats(data || { totalSessions: 0, averageScore: 0, totalTime: 0, totalWords: 0 });
-    } catch (error) {
-      console.error('Error fetching user stats:', error);
-    }
-  };
-
-  // Start session
-  const handleStartSession = async () => {
+  const handleStartSession = useCallback(async () => {
     setActive(true);
     setCompleted(false);
     setScore(null);
@@ -238,223 +256,92 @@ function Home() {
     setSpeechSeconds(0);
     setAudioLevel(0);
     setTranscript('');
-    setFrequencyData(Array.from({ length: 24 }, () => 0));
     setFaceBox(null);
     setFaceKeypoints([]);
-    
-    // Check if user is guest or signed in
-    if (authStep === 'guest') {
-      // Guest session - don't save to history
-      const guestSession = {
-        id: 'guest-' + Date.now(),
-        userId: 'guest-' + Date.now(),
-        username: 'Guest',
-        date: new Date().toISOString(),
-        status: 'guest',
-        score: null,
-        mistakes: []
-      };
-      localStorage.setItem('current_guest_session', JSON.stringify(guestSession));
-    } else if (user?.id) {
-      // Signed-in session - create session
+
+    if (user?.id && userClient) {
       try {
-        await createSession({
-          userId: user.id,
-          cameraId: selectedCamera?.deviceId,
-          micId: selectedMic?.deviceId,
+        const sessionId = await insertSession(userClient, {
+          user_id: user.id,
+          score: null,
+          status: 'in_progress',
+          date: new Date().toISOString(),
+          camera_id: selectedCamera?.deviceId,
+          mic_id: selectedMic?.deviceId,
         });
+        if (!sessionId) console.error('Error creating session');
       } catch (error) {
         console.error('Error creating session:', error);
       }
     }
-  };
+  }, [user, userClient, selectedCamera, selectedMic]);
 
-  // End session
-  const handleEndSession = () => {
+  const handleEndSession = useCallback(async () => {
     setActive(false);
     setCompleted(true);
-    
-    // Save session to history if user is signed in
-    if (user?.id && authStep !== 'guest') {
-      const sessionData = {
-        userId: user.id,
-        username: user.fullName || user.email?.split('@')[0] || 'User',
-        date: new Date().toISOString(),
-        score: score,
-        status: 'completed',
-        mistakes: [] // Would be populated from analysis
-      };
-      
-      supabase.from('session_history').insert([sessionData]).then(() => {
-        fetchHistory();
-        fetchUserStats();
-      });
-    }
-  };
 
-  // Sign out
-  const handleSignOut = async () => {
+    if (user?.id && userClient && score !== null) {
+      try {
+        await updateSessionScore(userClient, 'current', score, []);
+        await fetchHistory();
+        await fetchUserStats();
+      } catch (error) {
+        console.error('Error saving session:', error);
+      }
+    }
+  }, [user, userClient, score, fetchHistory, fetchUserStats]);
+
+  const handleSignOut = useCallback(async () => {
     await signOut();
-    setAuthStep('chooser');
     setSelectedCamera(null);
     setSelectedMic(null);
     localStorage.removeItem('echo_labs_user_prefs');
-    localStorage.removeItem('current_guest_session');
-    openToast({
+    toast({
       title: 'Signed Out',
       description: 'You have been signed out successfully.',
     });
-  };
+  }, [signOut]);
 
-  // Guest - view score without history access
-  const handleViewGuestScore = () => {
-    const guestSession = JSON.parse(localStorage.getItem('current_guest_session') || '{}');
-    if (guestSession.score !== null) {
-      openToast({
+  const handleViewGuestScore = useCallback(() => {
+    const guestSession = JSON.parse(
+      localStorage.getItem('current_guest_session') || '{}',
+    );
+    if (guestSession.score !== null && guestSession.score !== undefined) {
+      toast({
         title: 'Guest Session Score',
         description: `Your guest session score: ${guestSession.score}`,
       });
     } else {
-      openToast({
+      toast({
         title: 'No Score',
         description: 'No score was recorded for this guest session.',
       });
     }
-  };
+  }, []);
 
   return (
     <div className="min-h-screen bg-background font-sans antialiased">
-      {/* Auth Chooser Overlay */}
-      {authStep === 'chooser' && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-8 max-w-md w-full shadow-2xl">
-            <h2 className="text-2xl font-bold mb-6">Welcome to EchoLabs</h2>
-            <div className="space-y-4">
-              <button 
-                onClick={() => {
-                  setAuthStep('new-account');
-                  setIdentityName('');
-                }}
-                className="w-full bg-primary/10 text-primary hover:bg-primary/20 rounded-lg py-3 flex items-center justify-between"
-              >
-                <span>Create Account</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
-              <button 
-                onClick={() => setAuthStep('guest')}
-                className="w-full bg-secondary/10 text-secondary hover:bg-secondary/20 rounded-lg py-3 flex items-center justify-between"
-              >
-                <span>Continue as Guest</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
-              <button 
-                onClick={() => setAuthStep('signed-in')}
-                className="w-full bg-gray/10 text-gray-700 hover:bg-gray/20 rounded-lg py-3 flex items-center justify-between"
-              >
-                <span>Sign In</span>
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-            <p className="text-sm text-gray-500 mt-6">EchoLabs helps you improve your communication skills with AI-powered feedback.</p>
-          </div>
-        </div>
-      )}
-
-      {/* New Account Form */}
-      {authStep === 'new-account' && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-8 max-w-md w-full shadow-2xl">
-            <h2 className="text-2xl font-bold mb-6">Create Account</h2>
-            <p className="text-gray-600 mb-6">Enter your name to create an account</p>
-            <Input
-              placeholder="Your name"
-              value={identityName}
-              onValueChange={setIdentityName}
-              className="mb-4"
-            />
-            <div className="flex space-x-2">
-              <button 
-                onClick={() => {
-                  handleCreateAccount();
-                  setAuthStep('signed-in');
-                }}
-                className="flex-1 bg-primary text-white rounded-lg py-2 px-4 hover:bg-primary/90"
-              >
-                Create Account
-              </button>
-              <button 
-                onClick={() => {
-                  setAuthStep('chooser');
-                  setIdentityName('');
-                }}
-                className="flex-1 bg-gray-200 text-gray-700 rounded-lg py-2 px-4 hover:bg-gray-300"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Guest Mode Overlay */}
-      {authStep === 'guest' && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-8 max-w-md w-full shadow-2xl">
-            <h2 className="text-2xl font-bold mb-6">Continue as Guest</h2>
-            <p className="text-gray-600 mb-6">Start a session without an account. Your data won't be saved to history.</p>
-            <div className="flex space-x-2">
-              <button 
-                onClick={() => chooseGuest()}
-                className="flex-1 bg-primary text-white rounded-lg py-2 px-4 hover:bg-primary/90"
-              >
-                Start Guest Session
-              </button>
-              <button 
-                onClick={() => setAuthStep('chooser')}
-                className="flex-1 bg-gray-200 text-gray-700 rounded-lg py-2 px-4 hover:bg-gray-300"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Signed In Overlay */}
-      {authStep === 'signed-in' && user?.id && (
-        <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div className="bg-white rounded-xl p-8 max-w-md w-full shadow-2xl">
-            <h2 className="text-2xl font-bold mb-6">Welcome Back!</h2>
-            <p className="text-gray-600 mb-6">You're signed in. Start a new session or view your history.</p>
-            <div className="space-y-4">
-              <button 
-                onClick={() => setAuthStep('chooser')}
-                className="w-full bg-gray-200 text-gray-700 rounded-lg py-2 px-4 hover:bg-gray-300"
-              >
-                Start New Session
-              </button>
-              <button 
-                onClick={() => { window.location.href = '/history'; }}
-                className="w-full bg-secondary text-white rounded-lg py-2 px-4 hover:bg-secondary/90"
-              >
-                View History
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Main Application */}
       <div className="relative min-h-screen">
-        {/* Sidebar / Settings Menu */}
-        <aside className="fixed left-0 top-0 h-full w-64 bg-background/90 border-r border-border flex-shrink-0 transition-transform transform transition-all duration-300 ease-in-out {isActive ? 'translateX(0)' : 'translateX(-100%)'}">
-          <div className="p-6">
-            <h2 className="text-xl font-bold mb-6">Settings</h2>
-            
-            {/* Camera Selection */}
-            <div className="mb-4">
-              <Label className="block text-sm font-medium mb-2">Camera</Label>
-              <Select onValueChange={setSelectedCamera} className="w-full">
+        <aside className="fixed left-0 top-0 h-full w-72 bg-card/90 border-r border-border flex flex-col z-40">
+          <div className="p-5 flex-1 space-y-6">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-bold">Settings</h2>
+              {user?.emailAddresses?.[0]?.emailAddress && (
+                <div className="text-xs text-muted-foreground">
+                  {user.emailAddresses[0].emailAddress.split('@')[0]}
+                </div>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Camera</Label>
+              <Select
+                value={selectedCamera?.deviceId ?? ''}
+                onValueChange={(v: string) => {
+                  const found = cameraDevices.find((d) => d.deviceId === v);
+                  setSelectedCamera(found || null);
+                }}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="Select camera" />
                 </SelectTrigger>
@@ -467,10 +354,15 @@ function Home() {
               </Select>
             </div>
 
-            {/* Microphone Selection */}
-            <div className="mb-4">
-              <Label className="block text-sm font-medium mb-2">Microphone</Label>
-              <Select onValueChange={setSelectedMic} className="w-full">
+            <div className="space-y-2">
+              <Label className="text-sm font-medium">Microphone</Label>
+              <Select
+                value={selectedMic?.deviceId ?? ''}
+                onValueChange={(v: string) => {
+                  const found = micDevices.find((d) => d.deviceId === v);
+                  setSelectedMic(found || null);
+                }}
+              >
                 <SelectTrigger>
                   <SelectValue placeholder="Select microphone" />
                 </SelectTrigger>
@@ -483,174 +375,269 @@ function Home() {
               </Select>
             </div>
 
-            {/* Session Stats */}
-            {authStep === 'signed-in' && user?.id && (
-              <div className="mb-6 p-4 rounded-lg border">
-                <h3 className="font-medium mb-2">Session Stats</h3>
-                <div className="grid grid-cols-3 gap-2">
-                  <div>
-                    <p className="text-xs text-gray-500">Sessions</p>
-                    <p className="font-bold">{userStats.totalSessions}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">Avg Score</p>
-                    <p className="font-bold">{userStats.averageScore.toFixed(1)}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-gray-500">Total Time</p>
-                    <p className="font-bold">{Math.round(userStats.totalTime / 60)}m</p>
+            {user?.id && (
+              <Card>
+                <div className="space-y-3">
+                  <h3 className="text-sm font-medium">Session Stats</h3>
+                  <div className="grid grid-cols-3 gap-2">
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Sessions
+                      </p>
+                      <p className="font-bold text-lg">
+                        {history.length}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">
+                        Avg Score
+                      </p>
+                      <p className="font-bold text-lg">
+                        {history.length > 0
+                          ? (history.reduce((s, i) => s + (i.score ?? 0), 0) /
+                              history.length).toFixed(1)
+                          : '—'}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-muted-foreground">Best</p>
+                      <p className="font-bold text-lg">
+                        {history.length > 0
+                          ? Math.max(...history.map((i) => i.score ?? 0)).toFixed(
+                              1,
+                            )
+                          : '—'}
+                      </p>
+                    </div>
                   </div>
                 </div>
-              </div>
+              </Card>
             )}
 
-            {/* Sign Out Button */}
-            {authStep === 'signed-in' && (
-              <button 
+            {user?.id && (
+              <button
                 onClick={handleSignOut}
-                className="w-full mt-6 bg-destructive/10 text-destructive rounded-lg py-2 px-4 hover:bg-destructive/20 flex items-center justify-between"
+                className="w-full bg-destructive/10 text-destructive rounded-lg py-2 hover:bg-destructive/20 flex items-center justify-between"
               >
                 Sign Out
-                <Logout className="w-4 h-4" />
+                <LogOut className="w-4 h-4" />
               </button>
             )}
+
+            {user?.id && <UserButton />}
           </div>
         </aside>
 
-        {/* Content Area */}
-        <main className="ml-64 min-h-screen p-6 overflow-x-hidden">
-          {/* Header */}
-          <header className="mb-6">
-            <h1 className="text-3xl font-bold">EchoLabs</h1>
-            <p className="text-gray-600">AI-powered communication coaching</p>
+        <main className="pl-72 min-h-screen flex flex-col">
+          <header className="p-6 pb-2 border-b border-border">
+            <div className="flex items-center gap-3">
+              <Shield className="w-8 h-8 text-primary" />
+              <h1 className="text-3xl font-bold">EchoLabs</h1>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              Real-time delivery and voice coaching
+            </p>
           </header>
 
-          {/* Auth Check - Show overlay if not active */}
-          {!active && authStep === 'signed-in' && (
-            <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-10">
-              <div className="bg-white rounded-xl p-8 max-w-md w-full shadow-2xl text-center">
-                <h2 className="text-2xl font-bold mb-4">Select Camera & Microphone</h2>
-                <p className="text-gray-600 mb-6">Please select your camera and microphone devices to start the session.</p>
-                <div className="space-y-4">
-                  <div>
-                    <Label className="block text-sm font-medium">Camera</Label>
-                    <Select onValueChange={setSelectedCamera} className="w-full">
+          {!active && user?.id && (
+            <Card className="mx-6 mt-6 max-w-2xl">
+              <div className="p-6 space-y-5">
+                <div className="flex items-center gap-2">
+                  <Shield className="w-5 h-5 text-primary" />
+                  <h2 className="text-xl font-bold">Set up your session</h2>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  Pick a camera and microphone, then start. Your session will
+                  be saved to your history.
+                </p>
+
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">Camera</Label>
+                    <Select
+                      value={selectedCamera?.deviceId ?? ''}
+                      onValueChange={(v: string) => {
+                        const found = cameraDevices.find(
+                          (d) => d.deviceId === v,
+                        );
+                        setSelectedCamera(found || null);
+                      }}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Select camera" />
                       </SelectTrigger>
-                      <SelectItem value="">Select camera</SelectItem>
+                      <SelectItem value="">None</SelectItem>
                       {cameraDevices.map((device) => (
-                        <SelectItem key={device.deviceId} value={device.deviceId}>
+                        <SelectItem
+                          key={device.deviceId}
+                          value={device.deviceId}
+                        >
                           {device.label}
                         </SelectItem>
                       ))}
                     </Select>
                   </div>
-                  <div>
-                    <Label className="block text-sm font-medium">Microphone</Label>
-                    <Select onValueChange={setSelectedMic} className="w-full">
+
+                  <div className="space-y-2">
+                    <Label className="text-sm font-medium">
+                      Microphone
+                    </Label>
+                    <Select
+                      value={selectedMic?.deviceId ?? ''}
+                      onValueChange={(v: string) => {
+                        const found = micDevices.find(
+                          (d) => d.deviceId === v,
+                        );
+                        setSelectedMic(found || null);
+                      }}
+                    >
                       <SelectTrigger>
                         <SelectValue placeholder="Select microphone" />
                       </SelectTrigger>
-                      <SelectItem value="">Select microphone</SelectItem>
+                      <SelectItem value="">None</SelectItem>
                       {micDevices.map((device) => (
-                        <SelectItem key={device.deviceId} value={device.deviceId}>
+                        <SelectItem
+                          key={device.deviceId}
+                          value={device.deviceId}
+                        >
                           {device.label}
                         </SelectItem>
                       ))}
                     </Select>
                   </div>
-                  <button 
-                    onClick={handleStartSession}
-                    className="w-full bg-primary text-white rounded-lg py-3 hover:bg-primary/90 font-medium"
-                  >
-                    Start Session
-                  </button>
                 </div>
+
+                <button
+                  onClick={handleStartSession}
+                  disabled={
+                    (!selectedCamera || !selectedMic) &&
+                    cameraDevices.length > 0 &&
+                    micDevices.length > 0
+                  }
+                  className="w-full bg-primary text-primary-foreground rounded-lg py-3 font-medium hover:bg-primary/90 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {(!selectedCamera || !selectedMic) &&
+                  cameraDevices.length > 0 &&
+                  micDevices.length > 0
+                    ? 'Select camera and microphone'
+                    : 'Start Session'}
+                </button>
               </div>
-            </div>
+            </Card>
           )}
 
-          {/* Session Interface */}
           {active && (
-            <div className="relative">
-              {/* Score Panel */}
-              <div className="absolute top-6 right-6 bg-white/90 backdrop-blur-sm rounded-xl p-4 min-w-48 shadow-xl">
-                <div className="text-3xl font-bold {score !== null ? 'text-primary' : 'text-gray-400'}">
+            <div className="flex-1 relative">
+              <div className="absolute top-6 right-6 bg-card/90 backdrop-blur-sm rounded-xl p-4 min-w-48 shadow-lg">
+                <p className="text-xs text-muted-foreground mb-1">Score</p>
+                <p
+                  className={`text-4xl font-bold ${
+                    score !== null ? 'text-primary' : 'text-muted-foreground'
+                  }`}
+                >
                   {score !== null ? score.toFixed(1) : '--'}
-                </div>
-                <p className="text-xs text-gray-500 mt-1">Score</p>
+                </p>
               </div>
 
-              {/* Timer */}
-              <div className="absolute top-6 left-6 bg-white/90 backdrop-blur-sm rounded-xl p-4">
-                <div className="text-3xl font-bold">{Math.round(elapsed / 1000)}</div>
-                <p className="text-xs text-gray-500 mt-1">Time</p>
+              <div className="absolute top-6 left-6 bg-card/90 backdrop-blur-sm rounded-xl p-4 shadow-lg">
+                <p className="text-xs text-muted-foreground mb-1">Time</p>
+                <p className="text-4xl font-bold">
+                  {Math.round(elapsed / 1000)}s
+                </p>
               </div>
 
-              {/* Voice Activity */}
-              <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-white/90 backdrop-blur-sm rounded-full w-24 h-24 flex items-center justify-center">
-                <div className="w-full h-full bg-gradient-to-b from-green-500 via-yellow-500 to-red-500 rounded-full transition-all duration-300" 
-                     style={{ height: audioLevel > 0.5 ? '20px' : '10px' }}
-                />
-              </div>
-
-              {/* Face Analysis Canvas Container */}
-              <div className="relative flex-1">
-                {/* Face Analysis Overlay */}
-                {faceBox && (
-                  <div className="absolute inset-0 ring-2 ring-primary/50 opacity-80">
-                    {/* Visual feedback for face positioning */}
+              <div className="absolute bottom-6 left-1/2 -translate-x-1/2">
+                <div className="bg-card/90 backdrop-blur-sm rounded-full px-4 py-2 shadow-lg flex items-center gap-3">
+                  <div className="flex gap-1">
+                    {[...Array(5)].map((_, i) => (
+                      <div
+                        key={i}
+                        className={`w-1 bg-primary transition-all ${
+                          audioLevel > 0.1 + i * 0.1
+                            ? 'h-6'
+                            : 'h-2'
+                        }`}
+                      />
+                    ))}
                   </div>
-                )}
-
-                {/* Microphone Visualization */}
-                <canvas ref={canvasRef} className="absolute inset-0" />
-
-                {/* Real-time Monitor */}
-                <div className="absolute inset-0 opacity-50">
-                  {/* Real-time monitoring UI */}
+                  <p className="text-xs text-muted-foreground">
+                    {speechWords} words · {speechSeconds}s speech
+                  </p>
                 </div>
               </div>
 
-              {/* Transcript */}
-              {transcript && (
-                <div className="absolute bottom-10 left-6 right-6 bg-white/90 backdrop-blur-sm rounded-lg p-4 max-h-40 overflow-y-auto text-sm">
-                  <p className="font-medium mb-2">Transcript</p>
-                  <p>{transcript}</p>
+              {faceBox && (
+                <div
+                  className="absolute border-2 border-primary/60 rounded"
+                  style={{
+                    left: faceBox.x,
+                    top: faceBox.y,
+                    width: faceBox.width,
+                    height: faceBox.height,
+                  }}
+                >
+                  {faceKeypoints.map((p, i) =>
+                    p.visibility !== 0 ? (
+                      <div
+                        key={i}
+                        className="absolute w-2 h-2 bg-primary rounded-full"
+                        style={{
+                          left: p.x - 4,
+                          top: p.y - 4,
+                        }}
+                      />
+                    ) : null,
+                  )}
                 </div>
               )}
 
-              {/* Controls */}
+              <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
+
+              {transcript && (
+                <div className="absolute bottom-20 left-6 right-6 bg-card/90 backdrop-blur-sm rounded-lg p-4 max-h-48 overflow-y-auto text-sm shadow-lg">
+                  <p className="text-xs text-muted-foreground mb-2 font-medium">
+                    Transcript
+                  </p>
+                  <p className="whitespace-pre-wrap">{transcript}</p>
+                </div>
+              )}
+
               <div className="absolute bottom-6 right-6 flex gap-3">
                 <button
-                  onClick={() => {
-                    // Toggle recording
-                    setAudioLevel(prev => prev > 0 ? 0 : 0.5);
-                  }}
-                  className="w-12 h-12 bg-primary rounded-full flex items-center justify-center hover:bg-primary/90 transition-colors"
+                  onClick={() =>
+                    setAudioLevel((prev) => (prev > 0 ? 0 : 0.5))
+                  }
+                  className="w-12 h-12 bg-primary rounded-full flex items-center justify-center hover:bg-primary/90 shadow-lg"
                   aria-label="Toggle microphone"
                 >
-                  <Mic className="w-6 h-6 text-white" />
+                  <Mic className="w-6 h-6 text-primary-foreground" />
                 </button>
                 <button
                   onClick={() => setCompleted(true)}
-                  className="w-12 h-12 bg-secondary rounded-full flex items-center justify-center hover:bg-secondary/90 transition-colors"
+                  className="w-12 h-12 bg-secondary rounded-full flex items-center justify-center hover:bg-secondary/90 shadow-lg"
                   aria-label="End session"
                 >
-                  <Circle className="w-6 h-6 text-white" />
+                  <Circle className="w-6 h-6 text-secondary-foreground" />
                 </button>
               </div>
             </div>
           )}
 
-          {/* Completed State */}
           {completed && score !== null && (
             <div className="absolute inset-0 bg-black/50 flex items-center justify-center z-10">
-              <div className="bg-white rounded-xl p-8 max-w-md w-full text-center shadow-2xl">
-                <h2 className="text-3xl font-bold mb-4">Session Complete!</h2>
-                <p className="text-gray-600 mb-6">Your score: {score.toFixed(1)}</p>
-                <div className="space-y-4">
+              <Card className="max-w-md w-full mx-6 p-8 text-center">
+                <div className="mb-4">
+                  <div className="flex items-center justify-center w-14 h-14 rounded-full bg-primary/20 mb-2">
+                    <Shield className="w-7 h-7 text-primary" />
+                  </div>
+                  <p className="text-5xl font-bold text-primary">
+                    {score.toFixed(1)}
+                  </p>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Your score
+                  </p>
+                </div>
+                <div className="flex gap-3">
                   <button
                     onClick={() => {
                       setActive(false);
@@ -660,58 +647,77 @@ function Home() {
                       setSpeechSeconds(0);
                       setAudioLevel(0);
                       setTranscript('');
-                      setFrequencyData(Array.from({ length: 24 }, () => 0));
                       setFaceBox(null);
                       setFaceKeypoints([]);
                     }}
-                    className="w-full bg-primary text-white rounded-lg py-2 px-4 hover:bg-primary/90 font-medium"
+                    className="flex-1 bg-primary text-primary-foreground rounded-lg py-2 hover:bg-primary/90"
                   >
-                    Start New Session
+                    New Session
                   </button>
                   <button
-                    onClick={() => { window.location.href = '/history'; }}
-                    className="w-full bg-secondary text-white rounded-lg py-2 px-4 hover:bg-secondary/90 font-medium"
+                    onClick={() => (window.location.href = '/history')}
+                    className="flex-1 bg-muted text-muted-foreground rounded-lg py-2 hover:bg-muted/80"
                   >
                     View History
                   </button>
                 </div>
-              </div>
+              </Card>
             </div>
           )}
 
-          {/* History Preview (signed-in users) */}
-          {authStep === 'signed-in' && user?.id && !completed && (
-            <div className="mt-8 pt-8 border-t border-border">
-              <h3 className="font-medium mb-4">Recent Sessions</h3>
-              <div className="space-y-3">
-                {history.slice(0, 5).map((item) => (
-                  <div key={item.id} className="p-3 rounded-lg border hover:bg-accent/10 transition-colors">
-                    <div className="flex justify-between items-start">
-                      <span className="font-medium">{item.username}</span>
-                      <span className="text-sm text-gray-500">{new Date(item.date).toLocaleDateString()}</span>
+          {user?.id && !completed && !active && history.length > 0 && (
+            <Card className="mx-6 mt-6 max-w-2xl">
+              <div className="p-6">
+                <h3 className="text-lg font-medium mb-4">Your History</h3>
+                <div className="space-y-3">
+                  {history.slice(0, 5).map((item) => (
+                    <div
+                      key={item.id}
+                      className="flex items-center justify-between p-3 rounded-lg border border-border"
+                    >
+                      <div>
+                        <p className="font-medium">
+                          {item.username || 'You'}
+                        </p>
+                        <p className="text-xs text-muted-foreground">
+                          {new Date(item.date).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <div className="text-right">
+                        {item.score !== null && (
+                          <p className="font-bold text-primary">
+                            {item.score.toFixed(1)}
+                          </p>
+                        )}
+                        <Badge variant="secondary" className="mt-1">
+                          {item.status}
+                        </Badge>
+                      </div>
                     </div>
-                    <p className="text-xs text-gray-500">{item.mistakes.length} issues detected</p>
-                    {item.score && (
-                      <p className="font-medium mt-1">{item.score.toFixed(1)}</p>
-                    )}
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
-            </div>
+            </Card>
           )}
 
-          {/* Guest Score Access */}
-          {authStep === 'guest' && !completed && (
-            <div className="mt-8 pt-8 border-t border-border">
-              <h3 className="font-medium mb-4">Guest Session</h3>
-              <p className="text-gray-500 mb-4">Your guest session score will be shown here after completion.</p>
-              <button
-                onClick={handleViewGuestScore}
-                className="w-full bg-primary text-white rounded-lg py-2 px-4 hover:bg-primary/90 font-medium"
-              >
-                View Guest Score
-              </button>
-            </div>
+          {!user?.id && (
+            <Card className="mx-6 mt-6 max-w-2xl">
+              <div className="p-6 text-center">
+                <Shield className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
+                <h3 className="font-medium mb-1">Guest Session</h3>
+                <p className="text-sm text-muted-foreground mb-4">
+                  Your score will appear here after the session ends. History
+                  is not saved for guests — sign up to keep your practice
+                  history.
+                </p>
+                <button
+                  onClick={handleViewGuestScore}
+                  className="bg-primary text-primary-foreground rounded-lg py-2 px-4 font-medium hover:bg-primary/90"
+                >
+                  View Guest Score
+                </button>
+              </div>
+            </Card>
           )}
         </main>
       </div>
@@ -719,4 +725,69 @@ function Home() {
   );
 }
 
+function AuthChooser() {
+  return (
+    <div className="min-h-screen bg-background font-sans antialiased flex items-center justify-center p-6">
+      <div className="w-full max-w-md text-center">
+        <div className="bg-card rounded-xl p-8 shadow-2xl">
+          <div className="w-12 h-12 rounded-full bg-primary/20 flex items-center justify-center mx-auto mb-4">
+            <Shield className="w-6 h-6 text-primary" />
+          </div>
+          <h2 className="text-2xl font-bold mb-2">Welcome to EchoLabs</h2>
+          <p className="text-muted-foreground mb-6">
+            Improve your voice and delivery with AI-powered coaching.
+          </p>
+          <div className="space-y-3">            <SignIn />
+            <SignUp />            <style>{`
+              .cl-card { min-width: 280px; }
+            `}</style>
+  <style>{`
+    .cl-card { min-width: 280px; }
+  `}</style>
+  <style>{`
+    .cl-card { min-width: 280px; }
+  `}</style>
+            <style>{`
+              .cl-card { min-width: 280px; }
+            `}</style>
+            <button
+              onClick={() => {
+                const guestSession = {
+                  id: `guest-${Date.now()}`,
+                  userId: `guest-${Date.now()}`,
+                  username: 'Guest',
+                  date: new Date().toISOString(),
+                  status: 'guest' as const,
+                  score: null as null,
+                  mistakes: [] as { time: number; label: string; kind: 'good' | 'issue' }[],
+                };
+                localStorage.setItem('current_guest_session', JSON.stringify(guestSession));
+                window.location.reload();
+              }}
+              className="w-full bg-secondary/10 text-secondary hover:bg-secondary/20 rounded-lg py-3 flex items-center justify-between"
+            >
+              <span>Continue as Guest</span>
+              <ChevronRight className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}function Home() {
+  return (
+    <ClerkProviderWithRouter publishableKey={import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ?? ''}>
+      <SignedIn>
+        <AppContent />
+      </SignedIn>
+      <SignedOut>
+        <Suspense fallback={null}>
+          <AuthChooser />
+        </Suspense>
+      </SignedOut>
+    </ClerkProviderWithRouter>
+  );
+}
+
 export default Home;
+
