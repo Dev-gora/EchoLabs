@@ -15,7 +15,14 @@ import {
   Suspense,
 } from 'react';
 
-import { ChevronRight, Circle, Mic, LogOut, Shield } from 'lucide-react';
+import {
+  ChevronRight,
+  Circle,
+  Mic,
+  LogOut,
+  Shield,
+  UserRound,
+} from 'lucide-react';
 import {
   Card,
   Label,
@@ -773,10 +780,13 @@ function AuthChooser({ onGuest }: { onGuest: () => void }) {
                 );
                 onGuest();
               }}
-              className="w-full bg-secondary/10 text-secondary hover:bg-secondary/20 rounded-lg py-3 flex items-center justify-between"
+              className="w-full rounded-lg border border-border bg-background px-4 py-3 text-sm font-medium text-foreground hover:bg-muted transition-colors flex items-center justify-between gap-2"
             >
-              <span>Continue as Guest</span>
-              <ChevronRight className="w-4 h-4" />
+              <span className="flex items-center gap-2">
+                <UserRound className="w-4 h-4 text-muted-foreground" />
+                Continue as Guest
+              </span>
+              <ChevronRight className="w-4 h-4 text-muted-foreground" />
             </button>
           </div>
         </div>
