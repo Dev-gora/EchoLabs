@@ -1,0 +1,34 @@
+<svg width="1568" height="530" viewBox="0 0 1568 530" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="EchoLabs — speech assessment">
+  <defs>
+    <style>
+      .eb-wordmark { font-family: 'Poppins', 'Montserrat', 'Inter', 'Segoe UI', system-ui, sans-serif; font-weight: 800; }
+      .eb-tagline { font-family: 'Poppins', 'Montserrat', 'Inter', 'Segoe UI', system-ui, sans-serif; font-weight: 500; }
+    </style>
+  </defs>
+
+  <g transform="translate(210 110) scale(0.9)">
+    <g fill="#2B34E8">
+      <rect x="38" y="115" width="15" height="70" rx="7.5"/>
+      <rect x="64" y="90" width="15" height="120" rx="7.5"/>
+      <rect x="90" y="68" width="16" height="164" rx="8"/>
+      <rect x="117" y="92" width="15" height="116" rx="7.5"/>
+      <rect x="143" y="119" width="15" height="62" rx="7.5"/>
+      <rect x="12" y="145" width="16" height="10" rx="5"/>
+      <rect x="166" y="145" width="16" height="10" rx="5"/>
+    </g>
+    <g stroke="#16213E" stroke-width="17" stroke-linecap="round" stroke-linejoin="round" fill="none">
+      <path d="M206 96V52c0-14.4 11.6-26 26-26h44"/>
+      <path d="M308 26h44c14.4 0 26 11.6 26 26v44"/>
+      <path d="M206 204v44c0 14.4 11.6 26 26 26h44"/>
+      <path d="M308 274h44c14.4 0 26-11.6 26-26v-44"/>
+      <circle cx="292" cy="112" r="37"/>
+      <path d="M240 274v-14c0-32 23-54 52-54s52 22 52 54v14"/>
+    </g>
+  </g>
+
+  <rect x="652" y="156" width="5" height="228" rx="2.5" fill="#16213E" fill-opacity="0.85"/>
+
+  <text class="eb-wordmark" x="700" y="322" font-size="158" letter-spacing="-2" textLength="330" lengthAdjust="spacingAndGlyphs" fill="#16213E">Echo</text>
+  <text class="eb-wordmark" x="1036" y="322" font-size="158" letter-spacing="-2" textLength="392" lengthAdjust="spacingAndGlyphs" fill="#2B34E8">Labs</text>
+  <text class="eb-tagline" x="704" y="398" font-size="30" letter-spacing="14" fill="#5B6472">SPEECH ASSESSMENT</text>
+</svg>

@@ -132,6 +132,7 @@ const css = `
   border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
 .in-brand { display: flex; align-items: center; gap: 11px; }
+.in-brand-logo { height: 42px; width: auto; display: block; }
 .in-brand-mark {
   width: 32px; height: 32px;
   border-radius: 10px 10px 10px 3px;
@@ -554,8 +555,11 @@ export default function Intro() {
 
       <nav className="in-nav">
         <div className="in-brand">
-          <div className="in-brand-mark">F</div>
-          <div className="in-brand-name">EchoLabs<b>.</b></div>
+          <img
+            src={`${import.meta.env.BASE_URL}brand/logo-light.svg`}
+            alt="EchoLabs"
+            className="in-brand-logo"
+          />
         </div>
         <Link href="/app" className="in-nav-cta" data-testid="intro-nav-enter">
           Enter practice room <ArrowRight size={14} />

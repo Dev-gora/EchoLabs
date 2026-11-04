@@ -21,7 +21,6 @@ import {
   Mic,
   MicOff,
   LogOut,
-  Shield,
   UserRound,
 } from 'lucide-react';
 import {
@@ -601,11 +600,12 @@ function AppContent() {
 
         <main className="pl-72 min-h-screen flex flex-col">
           <header className="p-6 pb-2 border-b border-border">
-            <div className="flex items-center gap-3">
-              <Shield className="w-8 h-8 text-primary" />
-              <h1 className="text-3xl font-bold">EchoLabs</h1>
-            </div>
-            <p className="text-sm text-muted-foreground">
+            <img
+              src={`${import.meta.env.BASE_URL}brand/logo.svg`}
+              alt="EchoLabs — speech assessment"
+              className="h-16 w-auto"
+            />
+            <p className="text-sm text-muted-foreground mt-1">
               Real-time delivery and voice coaching
             </p>
           </header>
@@ -614,7 +614,12 @@ function AppContent() {
             <Card className="mx-6 mt-6 max-w-2xl">
               <div className="p-6 space-y-5">
                 <div className="flex items-center gap-2">
-                  <Shield className="w-5 h-5 text-primary" />
+                  <img
+                    src={`${import.meta.env.BASE_URL}brand/logo-mark.svg`}
+                    alt=""
+                    aria-hidden="true"
+                    className="h-7 w-auto"
+                  />
                   <h2 className="text-xl font-bold">Set up your session</h2>
                 </div>
                 <p className="text-sm text-muted-foreground">
@@ -825,7 +830,12 @@ function AppContent() {
               <Card className="max-w-md w-full mx-6 p-8 text-center">
                 <div className="mb-4">
                   <div className="flex items-center justify-center w-14 h-14 rounded-full bg-primary/20 mb-2">
-                    <Shield className="w-7 h-7 text-primary" />
+                    <img
+                      src={`${import.meta.env.BASE_URL}brand/logo-mark.svg`}
+                      alt=""
+                      aria-hidden="true"
+                      className="h-8 w-auto"
+                    />
                   </div>
                   <p className="text-5xl font-bold text-primary">
                     {score.toFixed(1)}
@@ -903,7 +913,12 @@ function AppContent() {
           {!userId && (
             <Card className="mx-6 mt-6 max-w-2xl">
               <div className="p-6 text-center">
-                <Shield className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
+                <img
+                  src={`${import.meta.env.BASE_URL}brand/logo-mark.svg`}
+                  alt=""
+                  aria-hidden="true"
+                  className="h-12 w-auto mx-auto mb-3 opacity-80"
+                />
                 <h3 className="font-medium mb-1">Guest Session</h3>
                 <p className="text-sm text-muted-foreground mb-4">
                   Your score will appear here after the session ends. History
@@ -932,10 +947,12 @@ function AuthChooser({ onGuest }: { onGuest: () => void }) {
     <div className="min-h-screen bg-background font-sans antialiased flex items-center justify-center p-6">
       <div className="w-full max-w-md text-center">
         <div className="bg-card rounded-xl p-8 shadow-2xl">
-          <div className="w-12 h-12 rounded-full bg-primary/20 flex items-center justify-center mx-auto mb-4">
-            <Shield className="w-6 h-6 text-primary" />
-          </div>
-          <h2 className="text-2xl font-bold mb-2">Welcome to EchoLabs</h2>
+          <img
+            src={`${import.meta.env.BASE_URL}brand/logo.svg`}
+            alt="EchoLabs — speech assessment"
+            className="h-20 w-auto mx-auto mb-5"
+          />
+          <h2 className="text-2xl font-bold mb-2">Welcome</h2>
           <p className="text-muted-foreground mb-6">
             Improve your voice and delivery with AI-powered coaching.
           </p>
