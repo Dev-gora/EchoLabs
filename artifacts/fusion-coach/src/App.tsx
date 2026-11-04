@@ -20,6 +20,7 @@ import {
   Card,
   Label,
   Select,
+  SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
@@ -331,12 +332,14 @@ function AppContent() {
                 <SelectTrigger>
                   <SelectValue placeholder="Select camera" />
                 </SelectTrigger>
-                <SelectItem value="">None</SelectItem>
-                {cameraDevices.map((device) => (
-                  <SelectItem key={device.deviceId} value={device.deviceId}>
-                    {device.label}
-                  </SelectItem>
-                ))}
+                <SelectContent>
+                  <SelectItem value="">None</SelectItem>
+                  {cameraDevices.map((device) => (
+                    <SelectItem key={device.deviceId} value={device.deviceId}>
+                      {device.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
               </Select>
             </div>
 
@@ -352,12 +355,14 @@ function AppContent() {
                 <SelectTrigger>
                   <SelectValue placeholder="Select microphone" />
                 </SelectTrigger>
-                <SelectItem value="">None</SelectItem>
-                {micDevices.map((device) => (
-                  <SelectItem key={device.deviceId} value={device.deviceId}>
-                    {device.label}
-                  </SelectItem>
-                ))}
+                <SelectContent>
+                  <SelectItem value="">None</SelectItem>
+                  {micDevices.map((device) => (
+                    <SelectItem key={device.deviceId} value={device.deviceId}>
+                      {device.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
               </Select>
             </div>
 
