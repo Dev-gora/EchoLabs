@@ -67,7 +67,7 @@
     "zod": "^3.23.8"
   },
   "dependencies": {
-    "@clerk/clerk-react": "^5.61.11",
+    "@clerk/react": "^6.18.5",
     "@mediapipe/tasks-vision": "^1.0.1",
     "@radix-ui/react-scroll-area": "^1.4.0",
     "@radix-ui/react-select": "^2.4.1",

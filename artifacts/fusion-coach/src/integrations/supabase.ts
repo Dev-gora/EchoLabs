@@ -29,17 +29,15 @@ export type EchoLabsSupabaseClient = SupabaseClient;
  * Pass the JWT from Clerk's `getToken()` (or `session.token`) so RLS
  * policies see `auth.jwt()->sub` / `auth.jwt()->user_id` as the user.
  */
-export function createUserClient(
-  jwt: string,
-  options?: ConstructorParameters<typeof SupabaseClient>[2],
-): SupabaseClient {
+export function createUserClient(jwt: string): SupabaseClient {
   return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    // supabase-js forwards this to the Authorization header, which is what
+    // Supabase RLS reads for `auth.jwt()->sub`.
+    accessToken: async () => jwt,
     auth: {
-      accessToken: jwt,
       autoRefreshToken: false,
       persistSession: false,
     },
-    ...options,
   });
 }
 

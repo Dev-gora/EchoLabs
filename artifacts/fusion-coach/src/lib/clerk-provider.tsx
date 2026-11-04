@@ -1,5 +1,5 @@
 import React from 'react';
-import { ClerkProvider } from '@clerk/clerk-react';
+import { ClerkProvider } from '@clerk/react';
 
 export function ClerkProviderWithRouter({
   children,

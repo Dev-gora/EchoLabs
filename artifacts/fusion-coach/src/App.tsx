@@ -1,10 +1,11 @@
 import {
-  SignedIn,
-  SignedOut,
+  Show,
   SignIn,
   SignUp,
   UserButton,
-} from '@clerk/clerk-react';
+  useAuth,
+  useUser,
+} from '@clerk/react';
 
 import {
   useState,
@@ -13,21 +14,10 @@ import {
   useCallback,
   Suspense,
 } from 'react';
-import { ClerkProviderWithRouter } from '@/lib/clerk-provider-with-router';
-import { useAuth as useAuthSafe } from '@clerk/clerk-react';
-import type { UseAuthReturn } from '@clerk/clerk-react';
 
-import {
-  Camera,
-  ChevronRight,
-  Circle,
-  Mic,
-  LogOut,
-  Shield,
-} from 'lucide-react';
+import { ChevronRight, Circle, Mic, LogOut, Shield } from 'lucide-react';
 import {
   Card,
-  Input,
   Label,
   Select,
   SelectItem,
@@ -35,6 +25,7 @@ import {
   SelectValue,
   Badge,
 } from '@/components/ui';
+import { Toaster } from '@/components/ui/toaster';
 import { toast } from '@/lib/use-toast';
 import {
   baseClient,
@@ -67,7 +58,7 @@ type MicDevice = { deviceId: string; label: string };
 function AppContent() {
   const [active, setActive] = useState(false);
   const [completed, setCompleted] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
+  const [elapsed] = useState(0);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [score, setScore] = useState<number | null>(null);
   const [speechWords, setSpeechWords] = useState(0);
@@ -93,25 +84,20 @@ function AppContent() {
     null,
   );
 
-  const auth = useAuthSafe();
-  const user = auth as UseAuthReturn & {
-    fullName?: string;
-    emailAddresses?: Array<{ emailAddress?: string }>;
-    id?: string;
-  };
-  const signOut = auth.signOut;
+  const { userId, getToken, signOut } = useAuth();
+  const { user } = useUser();
 
   useEffect(() => {
     let cancelled = false;
 
     async function bindClient() {
-      if (!user?.id) {
+      if (!userId) {
         setUserClient(baseClient);
         return;
       }
-      const getToken = async () => {
+      const getSessionToken = async () => {
         try {
-          const token = await user.getToken();
+          const token = await getToken();
           return typeof token === 'string' ? token : null;
         } catch {
           return null;
@@ -119,7 +105,7 @@ function AppContent() {
       };
       const client = await import('@/integrations/supabase').then(
         (m) =>
-          m.getAuthenticatedClient(getToken) as Promise<EchoLabsSupabaseClient>,
+          m.getAuthenticatedClient(getSessionToken) as Promise<EchoLabsSupabaseClient>,
       );
       if (!cancelled) setUserClient(client);
     }
@@ -128,7 +114,7 @@ function AppContent() {
     return () => {
       cancelled = true;
     };
-  }, [user?.id]);
+  }, [userId, getToken]);
 
   useEffect(() => {
     const saved = localStorage.getItem('echo_labs_user_prefs');
@@ -189,19 +175,19 @@ function AppContent() {
   });
 
   const fetchHistory = useCallback(async () => {
-    if (!user?.id || !userClient) {
+    if (!userId || !userClient) {
       setHistory([]);
       return;
     }
     try {
-      const items = await fetchUserSessions(userClient, user.id);
+      const items = await fetchUserSessions(userClient, userId);
       setHistory(
         items.map((item) => ({
           id: item.id,
-          userId: user.id,
+          userId,
           username:
-            user.fullName ||
-            user.emailAddresses[0]?.emailAddress?.split('@')[0] ||
+            user?.fullName ||
+            user?.primaryEmailAddress?.emailAddress?.split('@')[0] ||
             'User',
           date: item.date,
           score: item.score,
@@ -212,10 +198,10 @@ function AppContent() {
     } catch (error) {
       console.error('Error fetching history:', error);
     }
-  }, [user, userClient]);
+  }, [userId, user, userClient]);
 
   const fetchUserStats = useCallback(async () => {
-    if (!user?.id) {
+    if (!userId) {
       setUserStats({
         totalSessions: 0,
         averageScore: 0,
@@ -239,14 +225,14 @@ function AppContent() {
     } catch (error) {
       console.error('Error fetching user stats:', error);
     }
-  }, [user?.id, history]);
+  }, [userId, history]);
 
   useEffect(() => {
-    if (user?.id) {
+    if (userId) {
       fetchHistory();
       fetchUserStats();
     }
-  }, [user?.id, fetchHistory, fetchUserStats]);
+  }, [userId, fetchHistory, fetchUserStats]);
 
   const handleStartSession = useCallback(async () => {
     setActive(true);
@@ -259,10 +245,10 @@ function AppContent() {
     setFaceBox(null);
     setFaceKeypoints([]);
 
-    if (user?.id && userClient) {
+    if (userId && userClient) {
       try {
         const sessionId = await insertSession(userClient, {
-          user_id: user.id,
+          user_id: userId,
           score: null,
           status: 'in_progress',
           date: new Date().toISOString(),
@@ -274,13 +260,13 @@ function AppContent() {
         console.error('Error creating session:', error);
       }
     }
-  }, [user, userClient, selectedCamera, selectedMic]);
+  }, [userId, userClient, selectedCamera, selectedMic]);
 
   const handleEndSession = useCallback(async () => {
     setActive(false);
     setCompleted(true);
 
-    if (user?.id && userClient && score !== null) {
+    if (userId && userClient && score !== null) {
       try {
         await updateSessionScore(userClient, 'current', score, []);
         await fetchHistory();
@@ -289,7 +275,7 @@ function AppContent() {
         console.error('Error saving session:', error);
       }
     }
-  }, [user, userClient, score, fetchHistory, fetchUserStats]);
+  }, [userId, userClient, score, fetchHistory, fetchUserStats]);
 
   const handleSignOut = useCallback(async () => {
     await signOut();
@@ -326,9 +312,9 @@ function AppContent() {
           <div className="p-5 flex-1 space-y-6">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-bold">Settings</h2>
-              {user?.emailAddresses?.[0]?.emailAddress && (
+              {user?.primaryEmailAddress?.emailAddress && (
                 <div className="text-xs text-muted-foreground">
-                  {user.emailAddresses[0].emailAddress.split('@')[0]}
+                  {user.primaryEmailAddress.emailAddress.split('@')[0]}
                 </div>
               )}
             </div>
@@ -375,9 +361,9 @@ function AppContent() {
               </Select>
             </div>
 
-            {user?.id && (
+            {userId && (
               <Card>
-                <div className="space-y-3">
+                <div className="p-5 space-y-3">
                   <h3 className="text-sm font-medium">Session Stats</h3>
                   <div className="grid grid-cols-3 gap-2">
                     <div>
@@ -389,9 +375,7 @@ function AppContent() {
                       </p>
                     </div>
                     <div>
-                      <p className="text-xs text-muted-foreground">
-                        Avg Score
-                      </p>
+                      <p className="text-xs text-muted-foreground">Avg Score</p>
                       <p className="font-bold text-lg">
                         {history.length > 0
                           ? (history.reduce((s, i) => s + (i.score ?? 0), 0) /
@@ -410,11 +394,14 @@ function AppContent() {
                       </p>
                     </div>
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    {userStats.totalSessions} tracked sessions
+                  </p>
                 </div>
               </Card>
             )}
 
-            {user?.id && (
+            {userId && (
               <button
                 onClick={handleSignOut}
                 className="w-full bg-destructive/10 text-destructive rounded-lg py-2 hover:bg-destructive/20 flex items-center justify-between"
@@ -424,7 +411,7 @@ function AppContent() {
               </button>
             )}
 
-            {user?.id && <UserButton />}
+            {userId && <UserButton />}
           </div>
         </aside>
 
@@ -439,7 +426,7 @@ function AppContent() {
             </p>
           </header>
 
-          {!active && user?.id && (
+          {!active && userId && (
             <Card className="mx-6 mt-6 max-w-2xl">
               <div className="p-6 space-y-5">
                 <div className="flex items-center gap-2">
@@ -613,7 +600,7 @@ function AppContent() {
                   <Mic className="w-6 h-6 text-primary-foreground" />
                 </button>
                 <button
-                  onClick={() => setCompleted(true)}
+                  onClick={handleEndSession}
                   className="w-12 h-12 bg-secondary rounded-full flex items-center justify-center hover:bg-secondary/90 shadow-lg"
                   aria-label="End session"
                 >
@@ -655,17 +642,17 @@ function AppContent() {
                     New Session
                   </button>
                   <button
-                    onClick={() => (window.location.href = '/history')}
+                    onClick={handleViewGuestScore}
                     className="flex-1 bg-muted text-muted-foreground rounded-lg py-2 hover:bg-muted/80"
                   >
-                    View History
+                    Session Summary
                   </button>
                 </div>
               </Card>
             </div>
           )}
 
-          {user?.id && !completed && !active && history.length > 0 && (
+          {userId && !completed && !active && history.length > 0 && (
             <Card className="mx-6 mt-6 max-w-2xl">
               <div className="p-6">
                 <h3 className="text-lg font-medium mb-4">Your History</h3>
@@ -700,7 +687,7 @@ function AppContent() {
             </Card>
           )}
 
-          {!user?.id && (
+          {!userId && (
             <Card className="mx-6 mt-6 max-w-2xl">
               <div className="p-6 text-center">
                 <Shield className="w-8 h-8 text-muted-foreground mx-auto mb-3" />
@@ -725,7 +712,9 @@ function AppContent() {
   );
 }
 
-function AuthChooser() {
+function AuthChooser({ onGuest }: { onGuest: () => void }) {
+  const [mode, setMode] = useState<'sign-in' | 'sign-up'>('sign-in');
+
   return (
     <div className="min-h-screen bg-background font-sans antialiased flex items-center justify-center p-6">
       <div className="w-full max-w-md text-center">
@@ -737,19 +726,27 @@ function AuthChooser() {
           <p className="text-muted-foreground mb-6">
             Improve your voice and delivery with AI-powered coaching.
           </p>
-          <div className="space-y-3">            <SignIn />
-            <SignUp />            <style>{`
-              .cl-card { min-width: 280px; }
-            `}</style>
-  <style>{`
-    .cl-card { min-width: 280px; }
-  `}</style>
-  <style>{`
-    .cl-card { min-width: 280px; }
-  `}</style>
+          <div className="space-y-3">
+            {mode === 'sign-in' ? (
+              <SignIn routing="hash" />
+            ) : (
+              <SignUp routing="hash" />
+            )}
             <style>{`
               .cl-card { min-width: 280px; }
             `}</style>
+            <button
+              onClick={() =>
+                setMode((prev) =>
+                  prev === 'sign-in' ? 'sign-up' : 'sign-in',
+                )
+              }
+              className="text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground w-full"
+            >
+              {mode === 'sign-in'
+                ? 'New here? Create an account'
+                : 'Already have an account? Sign in'}
+            </button>
             <button
               onClick={() => {
                 const guestSession = {
@@ -759,10 +756,17 @@ function AuthChooser() {
                   date: new Date().toISOString(),
                   status: 'guest' as const,
                   score: null as null,
-                  mistakes: [] as { time: number; label: string; kind: 'good' | 'issue' }[],
+                  mistakes: [] as {
+                    time: number;
+                    label: string;
+                    kind: 'good' | 'issue';
+                  }[],
                 };
-                localStorage.setItem('current_guest_session', JSON.stringify(guestSession));
-                window.location.reload();
+                localStorage.setItem(
+                  'current_guest_session',
+                  JSON.stringify(guestSession),
+                );
+                onGuest();
               }}
               className="w-full bg-secondary/10 text-secondary hover:bg-secondary/20 rounded-lg py-3 flex items-center justify-between"
             >
@@ -774,20 +778,37 @@ function AuthChooser() {
       </div>
     </div>
   );
-}function Home() {
-  return (
-    <ClerkProviderWithRouter publishableKey={import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ?? ''}>
-      <SignedIn>
+}
+
+function Home() {
+  const [isGuest, setIsGuest] = useState(
+    () =>
+      typeof window !== 'undefined' &&
+      localStorage.getItem('current_guest_session') !== null,
+  );
+
+  if (isGuest) {
+    return (
+      <>
         <AppContent />
-      </SignedIn>
-      <SignedOut>
+        <Toaster />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <Show when="signed-in">
+        <AppContent />
+      </Show>
+      <Show when="signed-out">
         <Suspense fallback={null}>
-          <AuthChooser />
+          <AuthChooser onGuest={() => setIsGuest(true)} />
         </Suspense>
-      </SignedOut>
-    </ClerkProviderWithRouter>
+      </Show>
+      <Toaster />
+    </>
   );
 }
 
 export default Home;
-

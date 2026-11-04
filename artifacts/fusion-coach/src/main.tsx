@@ -7,7 +7,12 @@ import { ClerkProviderWithRouter } from '@/lib/clerk-provider-with-router';
 
 import './index.css';
 
-const publishableKey = import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ?? '';
+// Publishable keys are public by design. Prefer the env var, but fall back to
+// the project key so a deploy without VITE_CLERK_PUBLISHABLE_KEY set does not
+// render a blank screen behind a "Missing publishableKey" error.
+const publishableKey =
+  import.meta.env.VITE_CLERK_PUBLISHABLE_KEY ||
+  'pk_test_ZmFpdGhmdWwtZ25hdC03NTY1LmNsZXJrLmFjY291bnRzLmRldiQ';
 
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.getRegistrations().then((registrations) => {
@@ -17,12 +22,7 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-createRoot(document.getElementById('root')!, {
-  // Keeps caught errors off reportError(), which would raise the dev overlay.
-  onCaughtError: (error, errorInfo) => {
-    console.error(error, errorInfo.componentStack);
-  },
-}).render(
+createRoot(document.getElementById('root')!).render(
   <ErrorBoundary>
     <ThemeProvider defaultTheme="light" storageKey="echo-labs-theme">
       <ClerkProviderWithRouter publishableKey={publishableKey}>
