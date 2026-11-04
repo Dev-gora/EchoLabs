@@ -64,22 +64,18 @@ Copy `artifacts/fusion-coach/.env.example` to `artifacts/fusion-coach/.env`:
 cp artifacts/fusion-coach/.env.example artifacts/fusion-coach/.env
 ```
 
-Or use the first-run helper that ships with the frontend:
+Or use the one-click scripts at the project root. They install everything and
+start the whole stack (frontend + API + transcription service):
 
-```bash
-# Windows PowerShell
-cd artifacts/fusion-coach
-.
-start-platform.ps1
+| Platform | Install | Run | Stop |
+| --- | --- | --- | --- |
+| Windows | `install.bat` | `start_fusion.bat` | `stop_fusion.bat` |
+| macOS | `install.command` | `start_fusion.command` | `stop_fusion.command` |
+| Linux | `./install.sh` | `./start_fusion.sh` | `./stop_fusion.sh` |
 
-# macOS / Linux
-cd artifacts/fusion-coach
-chmod +x start-platform.sh
-./start-platform.sh
-```
-
-That helper will install dependencies if needed, create a local `.env`,
-and start `npm run dev` for you.
+The launchers start the services hidden, open the app at
+<http://localhost:5174> and close their own console window. See
+[SETUP.md](SETUP.md) for what gets installed, the ports and the log files.
 
 If you prefer to set up manually, create `artifacts/fusion-coach/.env` with:
 
@@ -93,7 +89,7 @@ It must **not** be committed in plain text.
 If you want the same experience on another laptop (Windows or Mac), the goal
 is: fresh clone, install deps, drop in a local `.env`, then `npm run dev`.
 
-Quick portability checklist:
+Quick portability checklist (all of it automated by the scripts above):
 
 1. Install Node.js matching the project’s expected version.
 2. Clone the repo or unzip the shipped folder.
@@ -103,6 +99,7 @@ Quick portability checklist:
 6. If the app talks to a local API server, start that too and point the
    frontend at it.
 
-If any of those steps fail on a new machine, that is the portability bug to fix
-next: missing dependency versions, hardcoded paths, or env setup that only works
-on one machine.
+On a fresh machine the whole list is: double-click the installer, then
+double-click the launcher. If any step fails there, that is the portability bug
+to fix next: missing dependency versions, hardcoded paths, or env setup that
+only works on one machine.
