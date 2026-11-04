@@ -19,6 +19,7 @@ import {
   ChevronRight,
   Circle,
   Mic,
+  MicOff,
   LogOut,
   Shield,
   UserRound,
@@ -63,11 +64,46 @@ type SessionStats = {
 type CameraDevice = { deviceId: string; label: string };
 type MicDevice = { deviceId: string; label: string };
 
+type SpeechRecognitionLike = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult:
+    | ((event: {
+        results: ArrayLike<{ 0: { transcript: string }; isFinal: boolean }>;
+      }) => void)
+    | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+/**
+ * Deterministic delivery proxy so ending a session always produces a score the
+ * speaker earned: reward a pace near 140 words per minute, and require enough
+ * speech for the number to mean anything.
+ */
+function computeDeliveryScore(words: number, elapsedMs: number): number {
+  const seconds = Math.max(1, elapsedMs / 1000);
+  const wordsPerMinute = (words / seconds) * 60;
+  const pace = Math.max(0, 100 - Math.abs(wordsPerMinute - 140) * 0.6);
+  const substance = Math.min(100, words * 2);
+  return Math.round((pace * 0.6 + substance * 0.4) * 10) / 10;
+}
+
 function AppContent() {
   const [active, setActive] = useState(false);
   const [completed, setCompleted] = useState(false);
-  const [elapsed] = useState(0);
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [micMuted, setMicMuted] = useState(false);
+  const [mediaError, setMediaError] = useState<string | null>(null);
+  const [stream, setStream] = useState<MediaStream | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const meterFrameRef = useRef<number | null>(null);
+  const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
+  const timerRef = useRef<number | null>(null);
   const [score, setScore] = useState<number | null>(null);
   const [speechWords, setSpeechWords] = useState(0);
   const [speechSeconds, setSpeechSeconds] = useState(0);
@@ -242,16 +278,140 @@ function AppContent() {
     }
   }, [userId, fetchHistory, fetchUserStats]);
 
+  const stopCapture = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    if (meterFrameRef.current !== null) {
+      cancelAnimationFrame(meterFrameRef.current);
+      meterFrameRef.current = null;
+    }
+    recognitionRef.current?.stop();
+    recognitionRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    setStream(null);
+    void audioContextRef.current?.close();
+    audioContextRef.current = null;
+    setAudioLevel(0);
+  }, []);
+
+  const startCapture = useCallback(async () => {
+    setMediaError(null);
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setMediaError(
+        'This browser has no camera or microphone capture. Try Chrome or Edge.',
+      );
+      return;
+    }
+
+    try {
+      const media = await navigator.mediaDevices.getUserMedia({
+        video: selectedCamera
+          ? { deviceId: { exact: selectedCamera.deviceId } }
+          : true,
+        audio: selectedMic ? { deviceId: { exact: selectedMic.deviceId } } : true,
+      });
+
+      streamRef.current = media;
+      setStream(media);
+
+      const startedAt = Date.now();
+      timerRef.current = window.setInterval(() => {
+        const ms = Date.now() - startedAt;
+        setElapsed(ms);
+        setSpeechSeconds(Math.round(ms / 1000));
+      }, 200);
+
+      const AudioContextCtor =
+        window.AudioContext ??
+        (window as unknown as { webkitAudioContext?: typeof AudioContext })
+          .webkitAudioContext;
+      if (AudioContextCtor) {
+        const context = new AudioContextCtor();
+        audioContextRef.current = context;
+        void context.resume();
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 1024;
+        context.createMediaStreamSource(media).connect(analyser);
+        const buffer = new Float32Array(analyser.fftSize);
+        const tick = () => {
+          analyser.getFloatTimeDomainData(buffer);
+          let sum = 0;
+          for (let i = 0; i < buffer.length; i += 1) {
+            sum += buffer[i] * buffer[i];
+          }
+          setAudioLevel(Math.min(1, Math.sqrt(sum / buffer.length) * 6));
+          meterFrameRef.current = requestAnimationFrame(tick);
+        };
+        meterFrameRef.current = requestAnimationFrame(tick);
+      }
+
+      const speechWindow = window as unknown as {
+        SpeechRecognition?: new () => SpeechRecognitionLike;
+        webkitSpeechRecognition?: new () => SpeechRecognitionLike;
+      };
+      const RecognitionCtor =
+        speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+      if (RecognitionCtor) {
+        const recognition = new RecognitionCtor();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+        recognition.lang = 'en-US';
+        recognition.onresult = (event) => {
+          let spoken = '';
+          for (let i = 0; i < event.results.length; i += 1) {
+            spoken += `${event.results[i][0].transcript} `;
+          }
+          const clean = spoken.replace(/\s+/g, ' ').trim();
+          setTranscript(clean);
+          setSpeechWords(clean ? clean.split(' ').length : 0);
+        };
+        recognition.onend = () => {
+          if (recognitionRef.current === recognition) {
+            try {
+              recognition.start();
+            } catch {
+              /* the session is closing */
+            }
+          }
+        };
+        recognition.start();
+        recognitionRef.current = recognition;
+      }
+    } catch (error) {
+      setMediaError(
+        error instanceof Error
+          ? error.message
+          : 'Could not start the camera or microphone.',
+      );
+    }
+  }, [selectedCamera, selectedMic]);
+
+  useEffect(() => {
+    if (videoRef.current && stream) {
+      videoRef.current.srcObject = stream;
+    }
+  }, [stream, active]);
+
+  useEffect(() => () => stopCapture(), [stopCapture]);
+
   const handleStartSession = useCallback(async () => {
     setActive(true);
     setCompleted(false);
     setScore(null);
     setSpeechWords(0);
     setSpeechSeconds(0);
+    setElapsed(0);
     setAudioLevel(0);
+    setMicMuted(false);
     setTranscript('');
     setFaceBox(null);
     setFaceKeypoints([]);
+
+    await startCapture();
 
     if (userId && userClient) {
       try {
@@ -268,22 +428,34 @@ function AppContent() {
         console.error('Error creating session:', error);
       }
     }
-  }, [userId, userClient, selectedCamera, selectedMic]);
+  }, [userId, userClient, selectedCamera, selectedMic, startCapture]);
 
   const handleEndSession = useCallback(async () => {
+    const finishedScore = computeDeliveryScore(speechWords, elapsed);
+
+    stopCapture();
     setActive(false);
     setCompleted(true);
+    setScore(finishedScore);
 
-    if (userId && userClient && score !== null) {
+    if (userId && userClient) {
       try {
-        await updateSessionScore(userClient, 'current', score, []);
+        await updateSessionScore(userClient, 'current', finishedScore, []);
         await fetchHistory();
         await fetchUserStats();
       } catch (error) {
         console.error('Error saving session:', error);
       }
     }
-  }, [userId, userClient, score, fetchHistory, fetchUserStats]);
+  }, [
+    userId,
+    userClient,
+    speechWords,
+    elapsed,
+    stopCapture,
+    fetchHistory,
+    fetchUserStats,
+  ]);
 
   const handleSignOut = useCallback(async () => {
     await signOut();
@@ -531,6 +703,12 @@ function AppContent() {
 
           {active && (
             <div className="flex-1 relative">
+              {mediaError && (
+                <div className="absolute top-6 left-1/2 -translate-x-1/2 z-20 max-w-md bg-destructive/10 text-destructive border border-destructive/30 rounded-lg px-4 py-2 text-sm text-center">
+                  {mediaError}
+                </div>
+              )}
+
               <div className="absolute top-6 right-6 bg-card/90 backdrop-blur-sm rounded-xl p-4 min-w-48 shadow-lg">
                 <p className="text-xs text-muted-foreground mb-1">Score</p>
                 <p
@@ -594,7 +772,13 @@ function AppContent() {
                 </div>
               )}
 
-              <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
+              <video
+                ref={videoRef}
+                autoPlay
+                muted
+                playsInline
+                className="absolute inset-0 h-full w-full object-cover bg-black"
+              />
 
               {transcript && (
                 <div className="absolute bottom-20 left-6 right-6 bg-card/90 backdrop-blur-sm rounded-lg p-4 max-h-48 overflow-y-auto text-sm shadow-lg">
@@ -607,13 +791,23 @@ function AppContent() {
 
               <div className="absolute bottom-6 right-6 flex gap-3">
                 <button
-                  onClick={() =>
-                    setAudioLevel((prev) => (prev > 0 ? 0 : 0.5))
-                  }
+                  onClick={() => {
+                    const nextMuted = !micMuted;
+                    streamRef.current
+                      ?.getAudioTracks()
+                      .forEach((track) => {
+                        track.enabled = !nextMuted;
+                      });
+                    setMicMuted(nextMuted);
+                  }}
                   className="w-12 h-12 bg-primary rounded-full flex items-center justify-center hover:bg-primary/90 shadow-lg"
-                  aria-label="Toggle microphone"
+                  aria-label={micMuted ? 'Unmute microphone' : 'Mute microphone'}
                 >
-                  <Mic className="w-6 h-6 text-primary-foreground" />
+                  {micMuted ? (
+                    <MicOff className="w-6 h-6 text-primary-foreground" />
+                  ) : (
+                    <Mic className="w-6 h-6 text-primary-foreground" />
+                  )}
                 </button>
                 <button
                   onClick={handleEndSession}
@@ -648,7 +842,10 @@ function AppContent() {
                       setScore(null);
                       setSpeechWords(0);
                       setSpeechSeconds(0);
+                      setElapsed(0);
                       setAudioLevel(0);
+                      setMicMuted(false);
+                      setMediaError(null);
                       setTranscript('');
                       setFaceBox(null);
                       setFaceKeypoints([]);
